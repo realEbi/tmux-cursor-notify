@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Merge the stop hook into ~/.cursor/hooks.json.
+resolve_dir() {
+  local source=$1
+  while [ -L "$source" ]; do
+    local dir target
+    dir=$(cd "$(dirname "$source")" && pwd -P)
+    target=$(readlink "$source")
+    case "$target" in
+      /*) source=$target ;;
+      *) source=$dir/$target ;;
+    esac
+  done
+  cd "$(dirname "$source")" && pwd -P
+}
+
+bin_dir=$(resolve_dir "$0")
+cmd="$bin_dir/notify-on-stop"
+cursor_dir=${HOME}/.cursor
+dest=$cursor_dir/hooks.json
+
+if [ -e "$cursor_dir" ] && [ ! -d "$cursor_dir" ]; then
+  exit 1
+fi
+if [ -e "$dest" ] && [ ! -f "$dest" ]; then
+  exit 1
+fi
+mkdir -p "$cursor_dir" || exit 1
+
+jq_works() {
+  command -v jq >/dev/null 2>&1 && jq -n . >/dev/null 2>&1
+}
+
+python_works() {
+  command -v python3 >/dev/null 2>&1 && python3 -c 'import json' >/dev/null 2>&1
+}
+
+JQ_EXISTING='
+def ours($c): type == "object" and .command == $c;
+if type != "object" then error("root")
+elif (has("version") and .version != 1) then error("version")
+else .
+end
+| .version = 1
+| if has("hooks") and ((.hooks | type) != "object") then error("hooks") else . end
+| .hooks //= {}
+| if ((.hooks | has("stop")) and ((.hooks.stop | type) != "array")) then error("stop") else . end
+| .hooks.stop //= []
+| if any(.hooks.stop[]; ours($cmd)) then .
+  else .hooks.stop += [{"command": $cmd}]
+  end
+'
+
+write_with_jq() {
+  local tmp
+  tmp=$(mktemp "$cursor_dir/hooks.json.tmp.XXXXXX") || return 1
+  if [ -f "$dest" ]; then
+    if ! jq --arg cmd "$cmd" "$JQ_EXISTING" "$dest" > "$tmp"; then
+      return 1
+    fi
+  else
+    if ! jq -n --arg cmd "$cmd" '{version: 1, hooks: {stop: [{command: $cmd}]}}' > "$tmp"; then
+      return 1
+    fi
+  fi
+  mv "$tmp" "$dest"
+}
+
+write_with_python() {
+  python3 - "$cmd" "$dest" << 'PY'
+import json, os, sys, tempfile
+cmd, dest = sys.argv[1], sys.argv[2]
+directory = os.path.dirname(dest)
+data = {"version": 1, "hooks": {"stop": [{"command": cmd}]}}
+if os.path.exists(dest):
+    try:
+        with open(dest) as handle:
+            data = json.load(handle)
+    except Exception:
+        raise SystemExit(1)
+    if not isinstance(data, dict):
+        raise SystemExit(1)
+    if "version" in data and data["version"] != 1:
+        raise SystemExit(1)
+    data["version"] = 1
+    if "hooks" in data and not isinstance(data["hooks"], dict):
+        raise SystemExit(1)
+    hooks = data.get("hooks") or {}
+    if not isinstance(hooks, dict):
+        raise SystemExit(1)
+    data["hooks"] = hooks
+    if "stop" in hooks and not isinstance(hooks["stop"], list):
+        raise SystemExit(1)
+    stop = hooks.get("stop") or []
+    hooks["stop"] = stop
+    if not any(isinstance(item, dict) and item.get("command") == cmd for item in stop):
+        stop.append({"command": cmd})
+fd, tmp = tempfile.mkstemp(dir=directory, prefix="hooks.json.")
+try:
+    with os.fdopen(fd, "w") as handle:
+        json.dump(data, handle)
+    os.replace(tmp, dest)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
+if jq_works; then
+  write_with_jq
+  exit $?
+fi
+if python_works; then
+  write_with_python
+  exit $?
+fi
+exit 1
