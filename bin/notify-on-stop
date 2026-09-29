@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# Cursor stop hook: notify when a CLI turn finishes in a tmux pane.
+input=$(cat || true)
+
+finish() {
+  printf '{}\n'
+  exit 0
+}
+
+if [ -z "${TMUX_PANE-}" ]; then
+  finish
+fi
+
+shell_quote() {
+  local escaped
+  escaped=${1//\'/\'\\\'\'}
+  printf "'%s'" "$escaped"
+}
+
+workspace_body() {
+  local p=$1
+  if [ -z "$p" ]; then
+    printf '%s' agent
+    return
+  fi
+  while [ -n "$p" ] && [ "$p" != "${p%/}" ]; do
+    p=${p%/}
+  done
+  if [ -z "$p" ]; then
+    printf '%s' agent
+    return
+  fi
+  local base=${p##*/}
+  if [ -z "$base" ]; then
+    printf '%s' agent
+  else
+    printf '%s' "$base"
+  fi
+}
+
+JQ_FILTER='
+if type != "object" then
+  "BAD"
+elif (.status | type) != "string" then
+  "SILENT"
+elif .status != "completed" and .status != "error" then
+  "SILENT"
+else
+  "NOTIFY",
+  ("status=" + .status),
+  ("conv=" + (if (.conversation_id | type) == "string" then .conversation_id else "" end)),
+  ("root=" + (if (.workspace_roots | type) == "array" and (.workspace_roots[0] | type) == "string" then .workspace_roots[0] else "" end))
+end
+'
+
+PY_FILTER='
+import json, sys
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw) if raw.strip() != "" else None
+except Exception:
+    sys.stdout.write("BAD\n")
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    sys.stdout.write("BAD\n")
+    raise SystemExit(0)
+status = data.get("status", None)
+if not isinstance(status, str) or status not in ("completed", "error"):
+    sys.stdout.write("SILENT\n")
+    raise SystemExit(0)
+conv = data.get("conversation_id", "")
+if not isinstance(conv, str):
+    conv = ""
+roots = data.get("workspace_roots", None)
+root = ""
+if isinstance(roots, list) and roots and isinstance(roots[0], str):
+    root = roots[0]
+sys.stdout.write("NOTIFY\n")
+sys.stdout.write("status=%s\n" % status)
+sys.stdout.write("conv=%s\n" % conv)
+sys.stdout.write("root=%s\n" % root)
+'
+
+parsed=
+decided=
+if command -v jq >/dev/null 2>&1; then
+  parsed=$(printf '%s' "$input" | jq -r "$JQ_FILTER" 2>/dev/null)
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    decided=1
+  elif [ "$rc" -ne 127 ]; then
+    parsed=BAD
+    decided=1
+  fi
+fi
+if [ -z "$decided" ] && command -v python3 >/dev/null 2>&1; then
+  parsed=$(printf '%s' "$input" | python3 -c "$PY_FILTER" 2>/dev/null)
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    decided=1
+  elif [ "$rc" -ne 127 ]; then
+    parsed=BAD
+    decided=1
+  fi
+fi
+if [ -z "$decided" ]; then
+  parsed=BAD
+fi
+
+action=$(printf '%s\n' "$parsed" | head -n 1)
+if [ "$action" = "SILENT" ]; then
+  finish
+fi
+
+title='Cursor finished'
+body=agent
+group=cursor-unknown
+if [ "$action" = "NOTIFY" ]; then
+  status=
+  conv=
+  root=
+  while IFS= read -r line; do
+    case "$line" in
+      status=*) status=${line#status=} ;;
+      conv=*) conv=${line#conv=} ;;
+      root=*) root=${line#root=} ;;
+    esac
+  done <<PARSE
+$parsed
+PARSE
+  if [ "$status" = "error" ]; then
+    title='Cursor hit an error'
+  fi
+  if [ -n "$conv" ]; then
+    group="cursor-$conv"
+  fi
+  body=$(workspace_body "$root")
+fi
+
+bin_dir=$(cd "$(dirname "$0")" && pwd -P)
+focus_pane="$bin_dir/focus-pane"
+bundle=${__CFBundleIdentifier-}
+socket=
+if [ -n "${TMUX-}" ]; then
+  socket=${TMUX%%,*}
+fi
+exec_cmd="$(shell_quote "$focus_pane") $(shell_quote "$bundle") $(shell_quote "$socket") $(shell_quote "$TMUX_PANE")"
+
+if ! terminal-notifier -title "$title" -message "$body" -sound Glass -group "$group" -execute "$exec_cmd"; then
+  osascript -e 'on run argv
+  display notification (item 2 of argv) with title (item 1 of argv) sound name (item 3 of argv)
+end run' -- "$title" "$body" Glass || true
+fi
+
+finish

@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+set -u
+source "$(dirname "$0")/harness.sh"
+
+run_hook() {
+  local json=$1
+  if [ "${KEEP_PANE_UNSET-}" = 1 ]; then
+    unset TMUX_PANE
+  elif [ -z "${TMUX_PANE+x}" ]; then
+    export TMUX_PANE=%12
+  fi
+  run_capture "$ROOT/bin/notify-on-stop" <<<"$json"
+}
+
+completed='{"status":"completed","conversation_id":"c1","workspace_roots":["/tmp/app"]}'
+
+test_notify_completed() {
+  harness_use_fakes
+  run_hook "$completed"
+  assert_exit 0
+  assert_stdout_trimmed '{}'
+  assert_log_contains terminal-notifier '-title'
+  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_log_contains terminal-notifier '-message'
+  assert_log_contains terminal-notifier 'app'
+  assert_log_contains terminal-notifier '-sound'
+  assert_log_contains terminal-notifier 'Glass'
+  assert_log_contains terminal-notifier '-group'
+  assert_log_contains terminal-notifier 'cursor-c1'
+}
+
+test_notify_error() {
+  harness_use_fakes
+  run_hook '{"status":"error","conversation_id":"c1","workspace_roots":["/tmp/app"]}'
+  assert_exit 0
+  assert_log_contains terminal-notifier 'Cursor hit an error'
+}
+
+test_notify_body_trailing_slash() {
+  harness_use_fakes
+  run_hook '{"status":"completed","workspace_roots":["/tmp/app/"]}'
+  assert_log_contains terminal-notifier 'app'
+}
+
+test_notify_body_root() {
+  harness_use_fakes
+  run_hook '{"status":"completed","workspace_roots":["/"]}'
+  assert_log_contains terminal-notifier 'agent'
+}
+
+test_notify_body_missing() {
+  harness_use_fakes
+  run_hook '{"status":"completed"}'
+  assert_log_contains terminal-notifier 'agent'
+}
+
+test_notify_body_empty_list() {
+  harness_use_fakes
+  run_hook '{"status":"completed","workspace_roots":[]}'
+  assert_log_contains terminal-notifier 'agent'
+}
+
+test_notify_body_empty_string() {
+  harness_use_fakes
+  run_hook '{"status":"completed","workspace_roots":[""]}'
+  assert_log_contains terminal-notifier 'agent'
+}
+
+test_notify_body_number() {
+  harness_use_fakes
+  run_hook '{"status":"completed","workspace_roots":[1]}'
+  assert_log_contains terminal-notifier 'agent'
+}
+
+test_notify_group() {
+  harness_use_fakes
+  run_hook '{"status":"completed","conversation_id":"c1"}'
+  run_hook '{"status":"completed","conversation_id":"c1"}'
+  run_hook '{"status":"completed","conversation_id":"c2"}'
+  assert_log_contains terminal-notifier 'cursor-c1'
+  assert_log_contains terminal-notifier 'cursor-c2'
+}
+
+test_notify_group_unknown() {
+  harness_use_fakes
+  run_hook '{"status":"completed"}'
+  run_hook '{"status":"completed","conversation_id":""}'
+  run_hook '{"status":"completed","conversation_id":1}'
+  assert_log_contains terminal-notifier 'cursor-unknown'
+  if grep -c -F -x 'cursor-unknown' "$FAKE_LOG/terminal-notifier" | grep -qx 3; then
+    :
+  else
+    echo "expected three cursor-unknown lines" >&2
+    cat "$FAKE_LOG/terminal-notifier" >&2
+    exit 1
+  fi
+}
+
+test_notify_execute_parts() {
+  harness_use_fakes
+  export __CFBundleIdentifier=com.apple.Terminal
+  export TMUX=/tmp/sock,123,0
+  export TMUX_PANE=%12
+  run_hook "$completed"
+  local fp
+  fp=$(cd "$ROOT/bin" && pwd -P)/focus-pane
+  assert_log_contains terminal-notifier "'$fp'"
+  assert_log_contains terminal-notifier "'com.apple.Terminal'"
+  assert_log_contains terminal-notifier "'/tmp/sock'"
+  assert_log_contains terminal-notifier "'%12'"
+}
+
+test_notify_socket_quote() {
+  harness_use_fakes
+  export TMUX="/tmp/so'ck,1,0"
+  export TMUX_PANE=%12
+  run_hook "$completed"
+  assert_log_contains terminal-notifier "'/tmp/so'\\''ck'"
+}
+
+test_notify_no_tmux_env() {
+  harness_use_fakes
+  unset TMUX
+  export TMUX_PANE=%12
+  run_hook "$completed"
+  assert_log_contains terminal-notifier "''"
+}
+
+test_notify_execute_absolute() {
+  harness_use_fakes
+  export TMUX_PANE=%12
+  run_hook "$completed"
+  local fp
+  fp=$(cd "$ROOT/bin" && pwd -P)/focus-pane
+  assert_log_contains terminal-notifier "'$fp'"
+}
+
+test_notify_no_pane() {
+  harness_use_fakes
+  KEEP_PANE_UNSET=1
+  run_hook "$completed"
+  assert_not_called terminal-notifier
+  assert_exit 0
+  assert_stdout_trimmed '{}'
+}
+
+test_notify_empty_pane() {
+  harness_use_fakes
+  export TMUX_PANE=
+  run_hook "$completed"
+  assert_not_called terminal-notifier
+  assert_exit 0
+  assert_stdout_trimmed '{}'
+}
+
+test_notify_no_pane_bad_json() {
+  harness_use_fakes
+  KEEP_PANE_UNSET=1
+  run_hook 'not-json'
+  assert_not_called terminal-notifier
+  assert_exit 0
+  assert_stdout_trimmed '{}'
+}
+
+test_notify_aborted() {
+  harness_use_fakes
+  run_hook '{"status":"aborted"}'
+  assert_not_called terminal-notifier
+}
+
+test_notify_other_status() {
+  harness_use_fakes
+  run_hook '{"status":"running"}'
+  assert_not_called terminal-notifier
+}
+
+test_notify_status_missing() {
+  harness_use_fakes
+  run_hook '{}'
+  assert_not_called terminal-notifier
+}
+
+test_notify_status_number() {
+  harness_use_fakes
+  run_hook '{"status":1}'
+  assert_not_called terminal-notifier
+}
+
+expect_default_notice() {
+  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_log_contains terminal-notifier 'agent'
+  assert_log_contains terminal-notifier 'cursor-unknown'
+  assert_log_contains terminal-notifier 'Glass'
+  assert_stdout_trimmed '{}'
+}
+
+test_notify_bad_json() {
+  harness_use_fakes
+  run_hook 'not-json'
+  expect_default_notice
+}
+
+test_notify_empty_stdin() {
+  harness_use_fakes
+  export TMUX_PANE=%12
+  run_capture "$ROOT/bin/notify-on-stop" </dev/null
+  expect_default_notice
+}
+
+test_notify_json_array() {
+  harness_use_fakes
+  run_hook '[]'
+  expect_default_notice
+}
+
+test_notify_json_null() {
+  harness_use_fakes
+  run_hook 'null'
+  expect_default_notice
+}
+
+test_notify_json_string() {
+  harness_use_fakes
+  run_hook '"hi"'
+  expect_default_notice
+}
+
+test_notify_python_fallback() {
+  harness_use_fakes
+  harness_hide jq
+  run_hook "$completed"
+  assert_log_contains terminal-notifier 'Cursor finished'
+}
+
+test_notify_no_parsers() {
+  harness_use_fakes
+  harness_hide jq
+  harness_hide python3
+  export TMUX_PANE=%12
+  run_hook "$completed"
+  expect_default_notice
+}
+
+test_notify_fallback_missing_notifier() {
+  harness_use_fakes
+  harness_hide terminal-notifier
+  run_hook "$completed"
+  assert_log_contains osascript 'display notification'
+  assert_log_contains osascript 'Glass'
+  assert_log_contains osascript 'Cursor finished'
+  assert_log_contains osascript 'app'
+  assert_log_lacks osascript '-execute'
+  assert_log_lacks osascript 'focus-pane'
+}
+
+test_notify_fallback_notifier_fails() {
+  harness_use_fakes
+  export FAKE_NOTIFIER_EXIT=1
+  run_hook "$completed"
+  assert_log_contains osascript 'display notification'
+  assert_log_contains osascript 'Glass'
+  assert_log_lacks osascript '-execute'
+  assert_log_lacks osascript 'focus-pane'
+}
+
+test_notify_fallback_quote_body() {
+  harness_use_fakes
+  export FAKE_NOTIFIER_EXIT=1
+  run_hook '{"status":"completed","workspace_roots":["/tmp/say\"hi"]}'
+  assert_log_contains osascript 'say"hi'
+  if grep -F 'on run argv' "$FAKE_LOG/osascript" | grep -F 'say"hi' >/dev/null; then
+    echo "body was interpolated into the AppleScript" >&2
+    exit 1
+  fi
+}
+
+test_notify_stdout_always() {
+  harness_use_fakes
+  run_hook '{"status":"aborted"}'
+  assert_exit 0
+  assert_stdout_trimmed '{}'
+
+  harness_use_fakes
+  run_hook 'not-json'
+  assert_exit 0
+  assert_stdout_trimmed '{}'
+
+  harness_use_fakes
+  KEEP_PANE_UNSET=1
+  run_hook "$completed"
+  assert_exit 0
+  assert_stdout_trimmed '{}'
+
+  harness_use_fakes
+  export FAKE_NOTIFIER_EXIT=1
+  export FAKE_OSA_DISPLAY_EXIT=1
+  run_hook "$completed"
+  assert_exit 0
+  assert_stdout_trimmed '{}'
+}
+
+run_tests \
+  test_notify_completed \
+  test_notify_error \
+  test_notify_body_trailing_slash \
+  test_notify_body_root \
+  test_notify_body_missing \
+  test_notify_body_empty_list \
+  test_notify_body_empty_string \
+  test_notify_body_number \
+  test_notify_group \
+  test_notify_group_unknown \
+  test_notify_execute_parts \
+  test_notify_socket_quote \
+  test_notify_no_tmux_env \
+  test_notify_execute_absolute \
+  test_notify_no_pane \
+  test_notify_empty_pane \
+  test_notify_no_pane_bad_json \
+  test_notify_aborted \
+  test_notify_other_status \
+  test_notify_status_missing \
+  test_notify_status_number \
+  test_notify_bad_json \
+  test_notify_empty_stdin \
+  test_notify_json_array \
+  test_notify_json_null \
+  test_notify_json_string \
+  test_notify_python_fallback \
+  test_notify_no_parsers \
+  test_notify_fallback_missing_notifier \
+  test_notify_fallback_notifier_fails \
+  test_notify_fallback_quote_body \
+  test_notify_stdout_always
