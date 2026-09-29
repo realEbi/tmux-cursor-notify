@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+mkdir -p "$FAKE_LOG"
+printf '%s\n' "$@" >> "$FAKE_LOG/osascript"
+line=$(printf '%s\n' "$*")
+
+if printf '%s' "$line" | grep -q 'display notification'; then
+  exit "${FAKE_OSA_DISPLAY_EXIT:-0}"
+fi
+
+if printf '%s' "$line" | grep -q 'to activate'; then
+  exit "${FAKE_ACTIVATE_EXIT:-0}"
+fi
+
+if printf '%s' "$line" | grep -q 'bundle identifier of first'; then
+  printf '%s\n' "${FAKE_OSA_BUNDLE:-com.example.Other}"
+  exit "${FAKE_OSA_EXIT:-0}"
+fi
+
+if printf '%s' "$line" | grep -q 'name of first application process'; then
+  printf '%s\n' "${FAKE_OSA_NAME:-Safari}"
+  exit "${FAKE_OSA_EXIT:-0}"
+fi
+
+if printf '%s' "$line" | grep -q 'contains'; then
+  name=$(printf '%s' "$line" | sed -n 's/.*contains "\([^"]*\)".*/\1/p')
+  val=$(printf '%s\n' "${FAKE_OSA_CONTAINS:-}" | awk -v n="$name" '$1 == n { print $2; exit }')
+  if [ "$val" = "exit" ]; then
+    exit 1
+  fi
+  if [ -z "$val" ]; then
+    val=false
+  fi
+  printf '%s\n' "$val"
+  exit 0
+fi
+
+exit 0

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+mkdir -p "$FAKE_LOG"
+printf '%s\n' "$@" >> "$FAKE_LOG/mv"
+if [ -n "${FAKE_MV_EXIT+x}" ]; then
+  exit "$FAKE_MV_EXIT"
+fi
+exec /bin/mv "$@"

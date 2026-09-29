@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+mkdir -p "$FAKE_LOG"
+printf '%s\n' "$@" >> "$FAKE_LOG/terminal-notifier"
+exit "${FAKE_NOTIFIER_EXIT:-0}"

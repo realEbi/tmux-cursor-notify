@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Activate the terminal and select the tmux pane from a notification click.
+bundle=${1-}
+socket=${2-}
+pane=${3-}
+
+name_walk() {
+  local name result
+  for name in Terminal iTerm2 Ghostty WezTerm kitty Alacritty; do
+    result=$(osascript -e "tell application \"System Events\" to (name of processes) contains \"$name\"") || result=
+    result=$(printf '%s' "$result" | sed 's/[[:space:]]*$//')
+    if [ "$result" = "true" ]; then
+      osascript -e "tell application \"$name\" to activate" || true
+      return 0
+    fi
+  done
+  return 0
+}
+
+if [ -n "$bundle" ] && ! printf '%s' "$bundle" | grep -q '["\\]'; then
+  osascript -e "tell application id \"$bundle\" to activate" || true
+else
+  name_walk || true
+fi
+
+if [ -n "$socket" ] && [ -n "$pane" ]; then
+  tmux -S "$socket" select-window -t "$pane" || true
+  tmux -S "$socket" select-pane -t "$pane" || true
+  tmux -S "$socket" switch-client -t "$pane" || true
+fi
+exit 0
