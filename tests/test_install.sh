@@ -253,6 +253,18 @@ test_install_stop_not_array() {
   assert_bytes_unchanged "$path" "$before"
 }
 
+
+test_install_python_rejects_bool_version() {
+  fresh_home
+  harness_hide jq
+  mkdir -p "$HOME/.cursor"
+  printf '%s\n' '{"version":true,"hooks":{"stop":[]}}' > "$HOME/.cursor/hooks.json"
+  before=$(cat "$HOME/.cursor/hooks.json")
+  run_install
+  if [ "$LAST_STATUS" -eq 0 ]; then echo "expected non-zero" >&2; exit 1; fi
+  if [ "$(cat "$HOME/.cursor/hooks.json")" != "$before" ]; then echo "changed" >&2; exit 1; fi
+}
+
 test_install_python_fallback() {
   fresh_home
   harness_hide jq
@@ -289,5 +301,6 @@ run_tests \
   test_install_root_array \
   test_install_hooks_not_object \
   test_install_stop_not_array \
+  test_install_python_rejects_bool_version \
   test_install_python_fallback \
   test_install_no_parsers

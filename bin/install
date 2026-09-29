@@ -80,7 +80,8 @@ if os.path.exists(dest):
         raise SystemExit(1)
     if not isinstance(data, dict):
         raise SystemExit(1)
-    if "version" in data and data["version"] != 1:
+    version = data.get("version", None)
+    if "version" in data and not (type(version) is int and version == 1):
         raise SystemExit(1)
     data["version"] = 1
     if "hooks" in data and not isinstance(data["hooks"], dict):
