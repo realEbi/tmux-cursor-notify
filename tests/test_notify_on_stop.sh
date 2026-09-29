@@ -299,6 +299,149 @@ test_notify_stdout_always() {
   assert_stdout_trimmed '{}'
 }
 
+test_notify_front_bundle_match_visible() {
+  harness_use_fakes
+  export __CFBundleIdentifier=com.apple.Terminal
+  export FAKE_OSA_BUNDLE=com.apple.Terminal
+  export FAKE_TMUX_DISPLAY='1 1 1'
+  run_hook "$completed"
+  assert_not_called terminal-notifier
+  assert_log_contains tmux 'display-message'
+  assert_log_lacks tmux '-S'
+  assert_log_contains tmux '-t'
+  assert_log_contains tmux '%12'
+  assert_log_contains tmux '#{pane_active} #{window_active} #{session_attached}'
+}
+
+test_notify_front_bundle_differs() {
+  harness_use_fakes
+  export __CFBundleIdentifier=com.apple.Terminal
+  export FAKE_OSA_BUNDLE=com.example.Other
+  run_hook "$completed"
+  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_log_lacks tmux 'display-message'
+}
+
+test_notify_front_name_in_list() {
+  harness_use_fakes
+  export FAKE_OSA_NAME=Ghostty
+  export FAKE_TMUX_DISPLAY='1 1 1'
+  run_hook "$completed"
+  assert_not_called terminal-notifier
+}
+
+test_notify_front_name_outside_list() {
+  harness_use_fakes
+  export FAKE_OSA_NAME=Safari
+  run_hook "$completed"
+  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_log_lacks tmux 'display-message'
+}
+
+test_notify_bundle_quote_uses_name() {
+  harness_use_fakes
+  export __CFBundleIdentifier='a"b'
+  export FAKE_OSA_NAME=Safari
+  run_hook "$completed"
+  assert_log_contains osascript 'name of first application process'
+  assert_log_lacks osascript 'bundle identifier of first'
+  assert_log_contains terminal-notifier 'Cursor finished'
+}
+
+test_notify_bundle_backslash_uses_name() {
+  harness_use_fakes
+  export __CFBundleIdentifier='a\b'
+  export FAKE_OSA_NAME=Safari
+  run_hook "$completed"
+  assert_log_contains osascript 'name of first application process'
+  assert_log_lacks osascript 'bundle identifier of first'
+  assert_log_contains terminal-notifier 'Cursor finished'
+}
+
+test_notify_frontmost_query_fails() {
+  harness_use_fakes
+  export FAKE_OSA_EXIT=1
+  export __CFBundleIdentifier=com.apple.Terminal
+  run_hook "$completed"
+  assert_log_contains terminal-notifier 'Cursor finished'
+}
+
+test_notify_pane_visible() {
+  harness_use_fakes
+  export FAKE_OSA_NAME=Terminal
+  export FAKE_TMUX_DISPLAY='1 1 1'
+  run_hook "$completed"
+  assert_not_called terminal-notifier
+}
+
+test_notify_other_pane() {
+  harness_use_fakes
+  export FAKE_OSA_NAME=Terminal
+  export FAKE_TMUX_DISPLAY='0 1 1'
+  run_hook "$completed"
+  assert_log_contains terminal-notifier 'Cursor finished'
+}
+
+test_notify_other_window() {
+  harness_use_fakes
+  export FAKE_OSA_NAME=Terminal
+  export FAKE_TMUX_DISPLAY='1 0 1'
+  run_hook "$completed"
+  assert_log_contains terminal-notifier 'Cursor finished'
+}
+
+test_notify_session_detached() {
+  harness_use_fakes
+  export FAKE_OSA_NAME=Terminal
+  export FAKE_TMUX_DISPLAY='1 1 0'
+  run_hook "$completed"
+  assert_log_contains terminal-notifier 'Cursor finished'
+}
+
+test_notify_session_attached_two() {
+  harness_use_fakes
+  export FAKE_OSA_NAME=Terminal
+  export FAKE_TMUX_DISPLAY='1 1 2'
+  run_hook "$completed"
+  assert_not_called terminal-notifier
+}
+
+test_notify_pane_check_fails() {
+  harness_use_fakes
+  export FAKE_OSA_NAME=Terminal
+  export FAKE_TMUX_DISPLAY_EXIT=1
+  run_hook "$completed"
+  assert_log_contains terminal-notifier 'Cursor finished'
+}
+
+test_notify_pane_check_garbage() {
+  harness_use_fakes
+  export FAKE_OSA_NAME=Terminal
+  export FAKE_TMUX_DISPLAY='visible'
+  run_hook "$completed"
+  assert_log_contains terminal-notifier 'Cursor finished'
+}
+
+test_notify_pane_check_socket() {
+  harness_use_fakes
+  export TMUX=/tmp/sock,123,0
+  export FAKE_OSA_NAME=Terminal
+  export FAKE_TMUX_DISPLAY='0 1 1'
+  run_hook "$completed"
+  assert_log_contains tmux '-S'
+  assert_log_contains tmux '/tmp/sock'
+  assert_log_contains tmux '-t'
+  assert_log_contains tmux '%12'
+}
+
+test_notify_not_frontmost_skips_pane_check() {
+  harness_use_fakes
+  export FAKE_OSA_NAME=Safari
+  run_hook "$completed"
+  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_log_lacks tmux 'display-message'
+}
+
 run_tests \
   test_notify_completed \
   test_notify_error \
@@ -331,4 +474,20 @@ run_tests \
   test_notify_fallback_missing_notifier \
   test_notify_fallback_notifier_fails \
   test_notify_fallback_quote_body \
-  test_notify_stdout_always
+  test_notify_stdout_always \
+  test_notify_front_bundle_match_visible \
+  test_notify_front_bundle_differs \
+  test_notify_front_name_in_list \
+  test_notify_front_name_outside_list \
+  test_notify_bundle_quote_uses_name \
+  test_notify_bundle_backslash_uses_name \
+  test_notify_frontmost_query_fails \
+  test_notify_pane_visible \
+  test_notify_other_pane \
+  test_notify_other_window \
+  test_notify_session_detached \
+  test_notify_session_attached_two \
+  test_notify_pane_check_fails \
+  test_notify_pane_check_garbage \
+  test_notify_pane_check_socket \
+  test_notify_not_frontmost_skips_pane_check
