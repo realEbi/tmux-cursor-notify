@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Activate the terminal and select the tmux pane from a notification click.
+# Notification clicks run with launchd's minimal PATH, which has no Homebrew.
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin"
 bundle=${1-}
 socket=${2-}
 pane=${3-}

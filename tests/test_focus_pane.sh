@@ -118,6 +118,17 @@ test_focus_activate_failure_still_tmux() {
   assert_log_contains tmux 'switch-client'
 }
 
+
+test_focus_minimal_path_still_uses_fake_tmux() {
+  harness_use_fakes
+  export PATH="$HARNESS_DIR/fakes:/usr/bin:/bin"
+  run_capture "$ROOT/bin/focus-pane" "com.apple.Terminal" "/tmp/tmux-501/default" "%12"
+  assert_exit 0
+  assert_log_contains tmux 'select-window'
+  assert_log_contains tmux 'select-pane'
+  assert_log_contains tmux 'switch-client'
+}
+
 run_tests \
   test_focus_live_pane \
   test_focus_dead_pane_still_activates \
@@ -130,4 +141,5 @@ run_tests \
   test_focus_none_running_no_tmux_when_socket_empty \
   test_focus_bundle_quote_uses_name_walk \
   test_focus_bundle_backslash_uses_name_walk \
-  test_focus_activate_failure_still_tmux
+  test_focus_activate_failure_still_tmux \
+  test_focus_minimal_path_still_uses_fake_tmux
