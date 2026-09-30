@@ -8,15 +8,15 @@ Date: 2026-09-29
 
 Notify the user when a Cursor CLI agent running in a local tmux pane finishes a turn, so they can leave the desk and come back when the result is ready.
 
-Approval-wait notifications are deferred. Cursor has no hook that means an approval prompt is on screen. v1 stays silent while a turn is blocked on approval.
+Approval-wait notifications were deferred in v1 (see **v2** below). Cursor has no hook that means an approval prompt is on screen. v1 stayed silent while a turn was blocked on approval.
 
 ## Decisions
 
 1. **Surface.** Watch `agent` / `cursor-agent` inside a tmux pane. The Cursor IDE is out of scope. A `stop` with no `TMUX_PANE` does not notify. That ignores IDE stops when the IDE process has no `TMUX_PANE`. An IDE launched from a tmux pane can inherit `TMUX_PANE` and is not filtered separately.
 2. **Host.** tmux runs locally on this Mac. Remote tmux over SSH is out of scope. Delivery is the macOS notification center.
-3. **Signal.** v1 uses the Cursor `stop` hook only. `completed` and `error` can notify. `aborted` does not. `beforeShellExecution` and `beforeMCPExecution` are not used.
+3. **Signal (v1).** The Cursor `stop` hook only. `completed` and `error` can notify. `aborted` does not. `beforeShellExecution` and `beforeMCPExecution` are not used. **Changed in v2:** approval uses those two hooks as triggers only; see **v2: approval notifications**.
 4. **Focus is per pane.** Stay silent only when the terminal app is frontmost and the agent's pane is visible: it is the active pane, in the active window, of a session with an attached client. If you are in the terminal but on another pane, window, or session, notify. No sound when silent.
-5. **Shape.** A user-level Cursor hook, plus a click helper that focuses the tmux pane. No pane polling. No TPM plugin.
+5. **Shape (v1).** A user-level Cursor hook, plus a click helper that focuses the tmux pane. No pane polling in v1. No TPM plugin. **Changed in v2:** a detached watcher polls the tmux pane for approval cards only.
 
 ## Architecture
 
@@ -25,6 +25,8 @@ Three programs, living in this repo under `bin/`:
 - `bin/notify-on-stop` is the `stop` hook. It reads JSON on stdin and posts at most one notification.
 - `bin/focus-pane` is the notification click action. It activates the terminal and selects the tmux pane.
 - `bin/install` merges a `stop` entry into `~/.cursor/hooks.json`. The command is the absolute path of `bin/notify-on-stop`. Existing hooks stay. A second install does not duplicate the entry. User-level hooks also load in the IDE. Stops with no `TMUX_PANE` are dropped. An IDE launched from a tmux pane can inherit `TMUX_PANE` and will notify; that case is not filtered.
+
+**v2:** adds `bin/notify-on-approval` and merges `beforeShellExecution` / `beforeMCPExecution` in `bin/install`. Details in **v2: approval notifications**.
 
 The hook is expected to inherit `TMUX` and `TMUX_PANE` from `agent`, because `agent` was started in that pane. `TMUX` looks like `<socket>,<pid>,<session>`. The socket passed to `focus-pane` is the text of `TMUX` before the first comma. If `TMUX` is missing, the socket is empty. `TMUX_PANE` looks like `%12`. A missing or empty `TMUX_PANE` means no notification. A missing socket still notifies; the click then skips tmux.
 
@@ -249,13 +251,40 @@ One manual check, not automated: with the hook installed, finish a turn in `agen
 
 ## Out of scope for v1
 
-- Approval-wait alerts, including forcing `permission: "ask"`.
+- Approval-wait alerts in v1, including forcing `permission: "ask"`. **In scope in v2** (observational hooks + pane polling; still no `permission` field).
 - Clearing the notification on the next prompt.
 - Supporting or testing the Cursor IDE, cloud agents, and remote tmux. IDE stops are ignored only when that process has no `TMUX_PANE`. An IDE started inside a tmux pane can inherit `TMUX_PANE` and is not filtered.
 - TPM install, pane polling, status-line widgets, Telegram, Pushover, and Discord.
 - Accept and Reject buttons on the notification.
 - Tab completions, and notifications for each tool call or thought.
 - A repeating nag while a turn is still running.
+
+
+## v2: approval notifications
+
+**Problem.** Cursor exposes no hook for “approval card is on screen.” The CLI draws the card in the tmux pane after `beforeShellExecution` / `beforeMCPExecution` return.
+
+**Approach.** Use those hooks as a trigger only: parse stdin for `conversation_id`, workspace root, and command or MCP tool snippet; print `{}` without `permission` so the hook abstains from the permission merge and does not change what Cursor allows. If `TMUX_PANE` is unset, exit immediately. Otherwise write a self-deleting temp worker script and spawn it detached (`python3` fork + `setsid`, `perl` fallback, `nohup` last resort), then return `{}` at once.
+
+**Polling.** After `NOTIFY_APPROVAL_DELAY` (default 0.4s), the worker loops at `NOTIFY_APPROVAL_INTERVAL` (default 0.5s), up to `NOTIFY_APPROVAL_POLLS` (default 240, ~2 minutes). Each iteration runs `tmux capture-pane` on the hook pane and inspects the last 15 lines.
+
+**Timing rules.**
+
+1. **Wait for card:** Until a matching card is seen, count polls without a marker; exit quietly after `NOTIFY_APPROVAL_APPEAR_POLLS` (default 40, ~20s) so auto-approved commands stay silent.
+2. **Notify when user leaves:** Once a matching card is seen, post when the terminal is not frontmost or the pane is not visible (same focus/pane rules as `stop`).
+3. **Stop watching:** Exit without notifying if the marker disappears after the card was seen, if a marker appears but the snippet does not match (different card), or when the poll budget is exhausted.
+
+**Matching.** Card markers from cursor-agent 2026.09.28 bundle strings: `Run this command?`, `Run this command outside the sandbox?`, `Run this MCP tool?`. When the hook snippet is at least 8 characters, the pane text (newlines removed) must contain the first 24 characters of the snippet so unrelated cards are ignored.
+
+**Suppression.** No notification while the user is frontmost on that pane. Same `terminal_is_front` / `pane_is_visible` helpers as `stop`.
+
+**Notification.** Title `Cursor needs approval`. Body: truncated command excerpt (80 chars) or workspace folder name. Group `cursor-<conversation_id>` (same as `stop`, so a finish notification replaces a pending approval). Sound `Glass`. Click runs `bin/focus-pane` via `terminal-notifier -execute`; `osascript display notification` fallback has no click action.
+
+**Installer.** `bin/install` idempotently merges `beforeShellExecution` and `beforeMCPExecution` entries pointing at `bin/notify-on-approval`, with `jq` or `python3`, keeping other hooks.
+
+**Tests.** `tests/run.sh` runs shell tests with fakes for `tmux`, `osascript`, `terminal-notifier`, and timing env vars.
+
+**Known limitations.** IDE approval cards are not in a tmux pane. Prompt text may change between CLI versions. Auto-approved commands never show a card and never notify.
 
 ## Background
 

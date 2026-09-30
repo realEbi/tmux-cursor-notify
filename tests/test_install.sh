@@ -2,7 +2,8 @@
 set -u
 source "$(dirname "$0")/harness.sh"
 
-EXPECTED=$(cd "$ROOT/bin" && pwd -P)/notify-on-stop
+STOP_EXPECTED=$(cd "$ROOT/bin" && pwd -P)/notify-on-stop
+APPROVAL_EXPECTED=$(cd "$ROOT/bin" && pwd -P)/notify-on-approval
 
 fresh_home() {
   harness_use_fakes
@@ -15,12 +16,19 @@ run_install() {
 }
 
 assert_created() {
-  python3 - "$HOME/.cursor/hooks.json" "$EXPECTED" <<'PY'
+  python3 - "$HOME/.cursor/hooks.json" "$STOP_EXPECTED" "$APPROVAL_EXPECTED" <<'PY'
 import json, sys
-path, cmd = sys.argv[1], sys.argv[2]
+path, stop, approval = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as handle:
     data = json.load(handle)
-expected = {"version": 1, "hooks": {"stop": [{"command": cmd}]}}
+expected = {
+    "version": 1,
+    "hooks": {
+        "stop": [{"command": stop}],
+        "beforeShellExecution": [{"command": approval}],
+        "beforeMCPExecution": [{"command": approval}],
+    },
+}
 if data != expected:
     print(f"assert_created: expected {expected!r} got {data!r}", file=sys.stderr)
     sys.exit(1)
@@ -65,9 +73,9 @@ test_install_appends() {
   printf '%s\n' '{"version":1,"hooks":{"stop":[{"command":"/bin/other"}]}}' > "$(hooks_path)"
   run_install
   assert_exit 0
-  python3 - "$(hooks_path)" "$EXPECTED" <<'PY'
+  python3 - "$(hooks_path)" "$STOP_EXPECTED" "$APPROVAL_EXPECTED" <<'PY'
 import json, sys
-path, ours = sys.argv[1], sys.argv[2]
+path, ours, approval = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as handle:
     data = json.load(handle)
 stop = data["hooks"]["stop"]
@@ -80,6 +88,12 @@ if stop[0] != {"command": "/bin/other"}:
 if stop[1] != {"command": ours}:
     print(f"second entry wrong: {stop[1]!r}", file=sys.stderr)
     sys.exit(1)
+approval = sys.argv[3]
+for name in ("beforeShellExecution", "beforeMCPExecution"):
+    arr = data["hooks"].get(name, [])
+    if len(arr) != 1 or arr[0].get("command") != approval:
+        print(f"{name} wrong: {arr!r}", file=sys.stderr)
+        sys.exit(1)
 PY
 }
 
@@ -89,7 +103,7 @@ test_install_keeps_non_object() {
   printf '%s\n' '{"hooks":{"stop":[null,"x"]}}' > "$(hooks_path)"
   run_install
   assert_exit 0
-  python3 - "$(hooks_path)" "$EXPECTED" <<'PY'
+  python3 - "$(hooks_path)" "$STOP_EXPECTED" <<'PY'
 import json, sys
 path, ours = sys.argv[1], sys.argv[2]
 with open(path) as handle:
@@ -120,6 +134,27 @@ with open(sys.argv[1]) as handle:
 if len(data["hooks"]["stop"]) != 1:
     print(f"expected stop length 1, got {len(data['hooks']['stop'])}", file=sys.stderr)
     sys.exit(1)
+for name in ("beforeShellExecution", "beforeMCPExecution"):
+    if len(data["hooks"][name]) != 1:
+        print(f"expected {name} length 1", file=sys.stderr)
+        sys.exit(1)
+PY
+}
+
+test_install_registers_approval_idempotent() {
+  fresh_home
+  run_install
+  assert_exit 0
+  run_install
+  assert_exit 0
+  python3 - "$(hooks_path)" <<'PY'
+import json, sys
+with open(sys.argv[1]) as handle:
+    data = json.load(handle)
+for name in ("beforeShellExecution", "beforeMCPExecution", "stop"):
+    if len(data["hooks"][name]) != 1:
+        print(f"duplicate {name}", file=sys.stderr)
+        sys.exit(1)
 PY
 }
 
@@ -292,6 +327,7 @@ run_tests \
   test_install_appends \
   test_install_keeps_non_object \
   test_install_idempotent \
+  test_install_registers_approval_idempotent \
   test_install_invalid_json \
   test_install_hooks_json_is_directory \
   test_install_cursor_is_file \

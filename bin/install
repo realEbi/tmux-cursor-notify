@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Merge the stop hook into ~/.cursor/hooks.json.
+# Merge stop and approval hooks into ~/.cursor/hooks.json.
 resolve_dir() {
   local source=$1
   while [ -L "$source" ]; do
@@ -15,7 +15,8 @@ resolve_dir() {
 }
 
 bin_dir=$(resolve_dir "$0")
-cmd="$bin_dir/notify-on-stop"
+stop_cmd="$bin_dir/notify-on-stop"
+approval_cmd="$bin_dir/notify-on-approval"
 cursor_dir=${HOME}/.cursor
 dest=$cursor_dir/hooks.json
 
@@ -37,6 +38,10 @@ python_works() {
 
 JQ_EXISTING='
 def ours($c): type == "object" and .command == $c;
+def add_hook($name; $c):
+  if ((.hooks | has($name)) and ((.hooks[$name] | type) != "array")) then error($name) else . end
+  | .hooks[$name] //= []
+  | if any(.hooks[$name][]; ours($c)) then . else .hooks[$name] += [{"command": $c}] end;
 if type != "object" then error("root")
 elif (has("version") and .version != 1) then error("version")
 else .
@@ -46,20 +51,22 @@ end
 | .hooks //= {}
 | if ((.hooks | has("stop")) and ((.hooks.stop | type) != "array")) then error("stop") else . end
 | .hooks.stop //= []
-| if any(.hooks.stop[]; ours($cmd)) then .
-  else .hooks.stop += [{"command": $cmd}]
+| if any(.hooks.stop[]; ours($stop)) then .
+  else .hooks.stop += [{"command": $stop}]
   end
+| add_hook("beforeShellExecution"; $approval)
+| add_hook("beforeMCPExecution"; $approval)
 '
 
 write_with_jq() {
   local tmp
   tmp=$(mktemp "$cursor_dir/hooks.json.tmp.XXXXXX") || return 1
   if [ -f "$dest" ]; then
-    if ! jq --arg cmd "$cmd" "$JQ_EXISTING" "$dest" > "$tmp"; then
+    if ! jq --arg stop "$stop_cmd" --arg approval "$approval_cmd" "$JQ_EXISTING" "$dest" > "$tmp"; then
       return 1
     fi
   else
-    if ! jq -n --arg cmd "$cmd" '{version: 1, hooks: {stop: [{command: $cmd}]}}' > "$tmp"; then
+    if ! jq -n --arg stop "$stop_cmd" --arg approval "$approval_cmd" '{version: 1, hooks: {stop: [{command: $stop}], beforeShellExecution: [{command: $approval}], beforeMCPExecution: [{command: $approval}]}}' > "$tmp"; then
       return 1
     fi
   fi
@@ -67,11 +74,18 @@ write_with_jq() {
 }
 
 write_with_python() {
-  python3 - "$cmd" "$dest" << 'PY'
+  python3 - "$stop_cmd" "$approval_cmd" "$dest" << 'PY'
 import json, os, sys, tempfile
-cmd, dest = sys.argv[1], sys.argv[2]
+stop_cmd, approval_cmd, dest = sys.argv[1], sys.argv[2], sys.argv[3]
 directory = os.path.dirname(dest)
-data = {"version": 1, "hooks": {"stop": [{"command": cmd}]}}
+data = {
+    "version": 1,
+    "hooks": {
+        "stop": [{"command": stop_cmd}],
+        "beforeShellExecution": [{"command": approval_cmd}],
+        "beforeMCPExecution": [{"command": approval_cmd}],
+    },
+}
 if os.path.exists(dest):
     try:
         with open(dest) as handle:
@@ -94,8 +108,15 @@ if os.path.exists(dest):
         raise SystemExit(1)
     stop = hooks.get("stop") or []
     hooks["stop"] = stop
-    if not any(isinstance(item, dict) and item.get("command") == cmd for item in stop):
-        stop.append({"command": cmd})
+    if not any(isinstance(item, dict) and item.get("command") == stop_cmd for item in stop):
+        stop.append({"command": stop_cmd})
+    for hook_name in ("beforeShellExecution", "beforeMCPExecution"):
+        if hook_name in hooks and not isinstance(hooks[hook_name], list):
+            raise SystemExit(1)
+        arr = hooks.get(hook_name) or []
+        hooks[hook_name] = arr
+        if not any(isinstance(item, dict) and item.get("command") == approval_cmd for item in arr):
+            arr.append({"command": approval_cmd})
 fd, tmp = tempfile.mkstemp(dir=directory, prefix="hooks.json.")
 try:
     with os.fdopen(fd, "w") as handle:
