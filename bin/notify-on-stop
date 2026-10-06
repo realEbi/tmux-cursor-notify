@@ -1,141 +1,26 @@
 #!/usr/bin/env bash
-# Cursor stop hook: notify when a CLI turn finishes in a tmux pane.
+# Cursor stop hook: notify when a CLI turn in a tmux pane completes or fails.
 . "$(cd "$(dirname "$0")" && pwd -P)/lib.sh"
-input=$(cat || true)
+input=$(cat)
 
-finish() {
-  printf '{}\n'
-  exit 0
-}
+if [ -n "${TMUX_PANE-}" ]; then
+  status= conv= folder=
+  # The folder is the last part of the first workspace path, e.g. /a/b/ -> b.
+  eval "$(printf '%s' "$input" | jq -r '
+    @sh "status=\(.status | strings // "")",
+    @sh "conv=\(.conversation_id | strings // "")",
+    @sh "folder=\(.workspace_roots[0]? | strings | sub("/+$"; "") | split("/") | last // "")"
+  ' 2>/dev/null)"
 
-if [ -z "${TMUX_PANE-}" ]; then
-  finish
-fi
+  case $status in
+    completed) title='Cursor finished' ;;
+    error) title='Cursor hit an error' ;;
+    *) title= ;;
+  esac
 
-workspace_body() {
-  local p=$1
-  if [ -z "$p" ]; then
-    printf '%s' agent
-    return
-  fi
-  while [ -n "$p" ] && [ "$p" != "${p%/}" ]; do
-    p=${p%/}
-  done
-  if [ -z "$p" ]; then
-    printf '%s' agent
-    return
-  fi
-  local base=${p##*/}
-  if [ -z "$base" ]; then
-    printf '%s' agent
-  else
-    printf '%s' "$base"
-  fi
-}
-
-JQ_FILTER='
-if type != "object" then
-  "BAD"
-elif (.status | type) != "string" then
-  "SILENT"
-elif .status != "completed" and .status != "error" then
-  "SILENT"
-else
-  "NOTIFY",
-  ("status=" + .status),
-  ("conv=" + (if (.conversation_id | type) == "string" then .conversation_id else "" end)),
-  ("root=" + (if (.workspace_roots | type) == "array" and (.workspace_roots[0] | type) == "string" then .workspace_roots[0] else "" end))
-end
-'
-
-PY_FILTER='
-import json, sys
-raw = sys.stdin.read()
-try:
-    data = json.loads(raw) if raw.strip() != "" else None
-except Exception:
-    sys.stdout.write("BAD\n")
-    raise SystemExit(0)
-if not isinstance(data, dict):
-    sys.stdout.write("BAD\n")
-    raise SystemExit(0)
-status = data.get("status", None)
-if not isinstance(status, str) or status not in ("completed", "error"):
-    sys.stdout.write("SILENT\n")
-    raise SystemExit(0)
-conv = data.get("conversation_id", "")
-if not isinstance(conv, str):
-    conv = ""
-roots = data.get("workspace_roots", None)
-root = ""
-if isinstance(roots, list) and roots and isinstance(roots[0], str):
-    root = roots[0]
-sys.stdout.write("NOTIFY\n")
-sys.stdout.write("status=%s\n" % status)
-sys.stdout.write("conv=%s\n" % conv)
-sys.stdout.write("root=%s\n" % root)
-'
-
-parsed=
-decided=
-if command -v jq >/dev/null 2>&1; then
-  parsed=$(printf '%s' "$input" | jq -r "$JQ_FILTER" 2>/dev/null)
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    decided=1
-  elif [ "$rc" -ne 127 ]; then
-    parsed=BAD
-    decided=1
+  # Stay quiet when you are already looking at this pane.
+  if [ -n "$title" ] && ! { terminal_is_front && pane_is_visible "$TMUX_PANE"; }; then
+    notify "$title" "${folder:-agent}" "cursor-${conv:-unknown}" "$TMUX_PANE"
   fi
 fi
-if [ -z "$decided" ] && command -v python3 >/dev/null 2>&1; then
-  parsed=$(printf '%s' "$input" | python3 -c "$PY_FILTER" 2>/dev/null)
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    decided=1
-  elif [ "$rc" -ne 127 ]; then
-    parsed=BAD
-    decided=1
-  fi
-fi
-if [ -z "$decided" ]; then
-  parsed=BAD
-fi
-
-action=$(printf '%s\n' "$parsed" | head -n 1)
-if [ "$action" = "SILENT" ]; then
-  finish
-fi
-
-title='Cursor finished'
-body=agent
-group=cursor-unknown
-if [ "$action" = "NOTIFY" ]; then
-  status=
-  conv=
-  root=
-  while IFS= read -r line; do
-    case "$line" in
-      status=*) status=${line#status=} ;;
-      conv=*) conv=${line#conv=} ;;
-      root=*) root=${line#root=} ;;
-    esac
-  done <<PARSE
-$parsed
-PARSE
-  if [ "$status" = "error" ]; then
-    title='Cursor hit an error'
-  fi
-  if [ -n "$conv" ]; then
-    group="cursor-$conv"
-  fi
-  body=$(workspace_body "$root")
-fi
-
-if terminal_is_front && pane_is_visible "$TMUX_PANE"; then
-  finish
-fi
-
-notify "$title" "$body" "$group" "$TMUX_PANE"
-
-finish
+printf '{}\n'

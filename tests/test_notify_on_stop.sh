@@ -186,59 +186,55 @@ test_notify_status_number() {
   assert_not_called terminal-notifier
 }
 
-expect_default_notice() {
-  assert_log_contains terminal-notifier 'Cursor finished'
-  assert_log_contains terminal-notifier 'agent'
-  assert_log_contains terminal-notifier 'cursor-unknown'
-  assert_log_contains terminal-notifier 'Glass'
+test_notify_folder_is_not_run() {
+  harness_use_fakes
+  export FAKE_OSA_NAME=Safari
+  local root="/tmp/it's \$(touch ran)"
+  cd "$FAKE_LOG" || exit 1
+  run_hook "$(jq -nc --arg r "$root" '{status: "completed", conversation_id: "c1", workspace_roots: [$r]}')"
+  assert_log_contains terminal-notifier "it's \$(touch ran)"
+  if [ -e "$FAKE_LOG/ran" ]; then
+    echo "workspace path from hook input was executed" >&2
+    exit 1
+  fi
+}
+
+expect_silent() {
+  assert_exit 0
+  assert_not_called terminal-notifier
+  assert_not_called osascript
   assert_stdout_trimmed '{}'
 }
 
 test_notify_bad_json() {
   harness_use_fakes
   run_hook 'not-json'
-  expect_default_notice
+  expect_silent
 }
 
 test_notify_empty_stdin() {
   harness_use_fakes
   export TMUX_PANE=%12
   run_capture "$ROOT/bin/notify-on-stop" </dev/null
-  expect_default_notice
+  expect_silent
 }
 
 test_notify_json_array() {
   harness_use_fakes
   run_hook '[]'
-  expect_default_notice
+  expect_silent
 }
 
 test_notify_json_null() {
   harness_use_fakes
   run_hook 'null'
-  expect_default_notice
+  expect_silent
 }
 
 test_notify_json_string() {
   harness_use_fakes
   run_hook '"hi"'
-  expect_default_notice
-}
-
-test_notify_python_fallback() {
-  harness_use_fakes
-  harness_hide jq
-  run_hook "$completed"
-  assert_log_contains terminal-notifier 'Cursor finished'
-}
-
-test_notify_no_parsers() {
-  harness_use_fakes
-  harness_hide jq
-  harness_hide python3
-  export TMUX_PANE=%12
-  run_hook "$completed"
-  expect_default_notice
+  expect_silent
 }
 
 test_notify_fallback_missing_notifier() {
@@ -423,6 +419,7 @@ test_notify_not_frontmost_skips_pane_check() {
 }
 
 run_tests \
+  test_notify_folder_is_not_run \
   test_notify_completed \
   test_notify_error \
   test_notify_body_trailing_slash \
@@ -449,8 +446,6 @@ run_tests \
   test_notify_json_array \
   test_notify_json_null \
   test_notify_json_string \
-  test_notify_python_fallback \
-  test_notify_no_parsers \
   test_notify_fallback_missing_notifier \
   test_notify_fallback_notifier_fails \
   test_notify_fallback_quote_body \

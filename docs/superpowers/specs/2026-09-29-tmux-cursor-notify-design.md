@@ -36,11 +36,11 @@ The hook is expected to inherit `TMUX` and `TMUX_PANE` from `agent`, because `ag
 
 1. Cursor runs `bin/notify-on-stop` when the agent loop ends.
 2. If `TMUX_PANE` is unset or empty, the script prints `{}` and exits. No notification.
-3. The script parses stdin with `jq` if it is on `PATH`, otherwise with `python3`. If neither is on `PATH`, or stdin is empty, or the value is not a JSON object, the payload is unparseable.
-4. If the payload parses and `status` is missing, not a string, `aborted`, or any string other than `completed` or `error`, the script prints `{}` and exits. No notification.
-5. If the payload is unparseable, or `status` is `completed` or `error`, it runs the focus check. When the terminal is frontmost and the agent's pane is visible, it prints `{}` and exits.
+3. The script reads `status`, `conversation_id`, and `workspace_roots[0]` from stdin with `jq`.
+4. If `status` is not `completed` or `error` (including `aborted`, missing, not a string, or input that is not a readable JSON object), the script prints `{}` and exits. No notification.
+5. Otherwise it runs the focus check. When the terminal is frontmost and the agent's pane is visible, it prints `{}` and exits.
 6. Otherwise it posts a notification:
-   - Title `Cursor finished` when the payload is unparseable or `status` is `completed`.
+   - Title `Cursor finished` when `status` is `completed`.
    - Title `Cursor hit an error` when `status` is `error`.
    - Body is the last path component of `workspace_roots[0]` after stripping trailing slashes, when that element is a non-empty string. `/tmp/app/` becomes `app`. If that component is empty, including when the path is `/`, the body is `agent`. A missing list, an empty list, an empty string, or a non-string element also uses `agent`.
    - Sound name `Glass`.
@@ -154,8 +154,7 @@ If `hooks.json` exists and is not a regular file, including when it is a directo
 `bin/notify-on-stop` always prints `{}` and exits 0. A hook bug must not continue the agent and must not block it. stderr content is unspecified and untested.
 
 - `TMUX_PANE` unset or empty: no notification. This includes IDE stops.
-- JSON that cannot be parsed, a non-object JSON value (`[]`, `null`, a string, a number), empty stdin, or both `jq` and `python3` missing: still try to notify, after the focus check, with title `Cursor finished`, body `agent`, sound `Glass`, and group id `cursor-unknown`. The click command still receives bundle id, socket, and pane id from the environment, using `''` for anything missing. This path still requires a non-empty `TMUX_PANE`.
-- A parsed object whose `status` is missing or not a string: no notification.
+- JSON that cannot be parsed, a non-object JSON value (`[]`, `null`, a string, a number), empty stdin, or a missing or non-string `status`: no notification. (v1 notified a generic `Cursor finished` for unreadable input; dropped once `jq` became required.)
 - Frontmost-app check fails: notify anyway.
 - Pane check fails (`tmux` missing, non-zero exit, or unexpected output): notify anyway.
 - `terminal-notifier` missing or exiting non-zero: post with `osascript`, no click action and no group id:
@@ -173,7 +172,7 @@ The script does not require a Homebrew install of `terminal-notifier`.
 
 ## Testing
 
-Automated tests do not start Cursor. Fakes for `osascript`, `terminal-notifier`, `tmux`, `jq`, `mv`, and `python3` record argv and can be told what to print and what exit code to use. The fake `osascript` classifies a call by the script text in Focus check and Click.
+Automated tests do not start Cursor. Fakes for `osascript`, `terminal-notifier`, `tmux`, and `mv` record argv and can be told what to print and what exit code to use. The fake `osascript` classifies a call by the script text in Focus check and Click.
 
 Hook tests run `bin/notify-on-stop` with fixture JSON on stdin and fakes earlier on `PATH`. They set `TMUX_PANE` unless a bullet says otherwise. They assert:
 
@@ -200,9 +199,8 @@ Hook tests run `bin/notify-on-stop` with fixture JSON on stdin and fakes earlier
 - Terminal frontmost and fake `tmux display-message` exits non-zero or prints unexpected text: the notifier is called.
 - Terminal not frontmost: the notifier is called and `tmux display-message` is not run.
 - `TMUX=/tmp/sock,123,0` makes the pane check pass `-S /tmp/sock` and `-t` set to `TMUX_PANE`.
-- Bad JSON, empty stdin, and a JSON array, `null`, or string still notify with title `Cursor finished`, body `agent`, group id `cursor-unknown`, and sound `Glass`, and stdout is `{}`.
-- With `jq` absent and `python3` present, a `completed` payload still notifies.
-- With both `jq` and `python3` absent, a non-empty `TMUX_PANE`, and a `completed` payload, the script still notifies with title `Cursor finished`, body `agent`, group id `cursor-unknown`, and sound `Glass`, and trimmed stdout is `{}`.
+- Bad JSON, empty stdin, and a JSON array, `null`, or string do not notify, and stdout is `{}`.
+- A workspace path containing quotes and `$(...)` appears literally in the body and is never executed.
 - With `terminal-notifier` absent, the script calls the `display notification` argv form with the same title, body, and `Glass`, and that call has no click command.
 - With `terminal-notifier` exiting non-zero, the same `display notification` fallback runs.
 - A body containing `"` is passed as an argv item to that fallback, not interpolated into the AppleScript text.
