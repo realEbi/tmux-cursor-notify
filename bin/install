@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Merge stop and approval hooks into ~/.cursor/hooks.json.
+# Add this checkout's hooks to ~/.cursor/hooks.json, keeping any other hooks.
 resolve_dir() {
   local source=$1
   while [ -L "$source" ]; do
@@ -14,125 +14,37 @@ resolve_dir() {
   cd "$(dirname "$source")" && pwd -P
 }
 
+fail() {
+  printf 'install: %s\n' "$1" >&2
+  exit 1
+}
+
 bin_dir=$(resolve_dir "$0")
-stop_cmd="$bin_dir/notify-on-stop"
-approval_cmd="$bin_dir/notify-on-approval"
-cursor_dir=${HOME}/.cursor
+cursor_dir=$HOME/.cursor
 dest=$cursor_dir/hooks.json
 
-if [ -e "$cursor_dir" ] && [ ! -d "$cursor_dir" ]; then
-  exit 1
+command -v jq >/dev/null 2>&1 && jq -n . >/dev/null 2>&1 || fail 'jq not found'
+mkdir -p "$cursor_dir" || fail "cannot create $cursor_dir"
+
+current='{}'
+if [ -s "$dest" ]; then
+  current=$(cat "$dest") || fail "cannot read $dest"
 fi
-if [ -e "$dest" ] && [ ! -f "$dest" ]; then
-  exit 1
+
+merged=$(printf '%s' "$current" | jq --arg bin "$bin_dir" '
+  def add($event; $cmd):
+    .hooks[$event] |= ((. // []) | if any(.[]; .command? == $cmd) then . else . + [{command: $cmd}] end);
+  if has("version") and .version != 1 then error("unsupported version") else . end
+  | .version = 1
+  | reduce (
+      ["stop", "notify-on-stop"],
+      ["beforeShellExecution", "notify-on-approval"],
+      ["beforeMCPExecution", "notify-on-approval"]
+    ) as [$event, $script] (.; add($event; $bin + "/" + $script))
+') || fail "cannot update $dest; left unchanged"
+
+tmp=$(mktemp "$dest.XXXXXX") || fail "cannot write to $cursor_dir"
+if ! printf '%s\n' "$merged" > "$tmp" || ! mv "$tmp" "$dest"; then
+  rm -f "$tmp"
+  fail "cannot write $dest"
 fi
-mkdir -p "$cursor_dir" || exit 1
-
-jq_works() {
-  command -v jq >/dev/null 2>&1 && jq -n . >/dev/null 2>&1
-}
-
-python_works() {
-  command -v python3 >/dev/null 2>&1 && python3 -c 'import json' >/dev/null 2>&1
-}
-
-JQ_EXISTING='
-def ours($c): type == "object" and .command == $c;
-def add_hook($name; $c):
-  if ((.hooks | has($name)) and ((.hooks[$name] | type) != "array")) then error($name) else . end
-  | .hooks[$name] //= []
-  | if any(.hooks[$name][]; ours($c)) then . else .hooks[$name] += [{"command": $c}] end;
-if type != "object" then error("root")
-elif (has("version") and .version != 1) then error("version")
-else .
-end
-| .version = 1
-| if has("hooks") and ((.hooks | type) != "object") then error("hooks") else . end
-| .hooks //= {}
-| if ((.hooks | has("stop")) and ((.hooks.stop | type) != "array")) then error("stop") else . end
-| .hooks.stop //= []
-| if any(.hooks.stop[]; ours($stop)) then .
-  else .hooks.stop += [{"command": $stop}]
-  end
-| add_hook("beforeShellExecution"; $approval)
-| add_hook("beforeMCPExecution"; $approval)
-'
-
-write_with_jq() {
-  local tmp
-  tmp=$(mktemp "$cursor_dir/hooks.json.tmp.XXXXXX") || return 1
-  if [ -f "$dest" ]; then
-    if ! jq --arg stop "$stop_cmd" --arg approval "$approval_cmd" "$JQ_EXISTING" "$dest" > "$tmp"; then
-      return 1
-    fi
-  else
-    if ! jq -n --arg stop "$stop_cmd" --arg approval "$approval_cmd" '{version: 1, hooks: {stop: [{command: $stop}], beforeShellExecution: [{command: $approval}], beforeMCPExecution: [{command: $approval}]}}' > "$tmp"; then
-      return 1
-    fi
-  fi
-  mv "$tmp" "$dest"
-}
-
-write_with_python() {
-  python3 - "$stop_cmd" "$approval_cmd" "$dest" << 'PY'
-import json, os, sys, tempfile
-stop_cmd, approval_cmd, dest = sys.argv[1], sys.argv[2], sys.argv[3]
-directory = os.path.dirname(dest)
-data = {
-    "version": 1,
-    "hooks": {
-        "stop": [{"command": stop_cmd}],
-        "beforeShellExecution": [{"command": approval_cmd}],
-        "beforeMCPExecution": [{"command": approval_cmd}],
-    },
-}
-if os.path.exists(dest):
-    try:
-        with open(dest) as handle:
-            data = json.load(handle)
-    except Exception:
-        raise SystemExit(1)
-    if not isinstance(data, dict):
-        raise SystemExit(1)
-    version = data.get("version", None)
-    if "version" in data and not (type(version) is int and version == 1):
-        raise SystemExit(1)
-    data["version"] = 1
-    if "hooks" in data and not isinstance(data["hooks"], dict):
-        raise SystemExit(1)
-    hooks = data.get("hooks") or {}
-    if not isinstance(hooks, dict):
-        raise SystemExit(1)
-    data["hooks"] = hooks
-    if "stop" in hooks and not isinstance(hooks["stop"], list):
-        raise SystemExit(1)
-    stop = hooks.get("stop") or []
-    hooks["stop"] = stop
-    if not any(isinstance(item, dict) and item.get("command") == stop_cmd for item in stop):
-        stop.append({"command": stop_cmd})
-    for hook_name in ("beforeShellExecution", "beforeMCPExecution"):
-        if hook_name in hooks and not isinstance(hooks[hook_name], list):
-            raise SystemExit(1)
-        arr = hooks.get(hook_name) or []
-        hooks[hook_name] = arr
-        if not any(isinstance(item, dict) and item.get("command") == approval_cmd for item in arr):
-            arr.append({"command": approval_cmd})
-fd, tmp = tempfile.mkstemp(dir=directory, prefix="hooks.json.")
-try:
-    with os.fdopen(fd, "w") as handle:
-        json.dump(data, handle)
-    os.replace(tmp, dest)
-except Exception:
-    raise SystemExit(1)
-PY
-}
-
-if jq_works; then
-  write_with_jq
-  exit $?
-fi
-if python_works; then
-  write_with_python
-  exit $?
-fi
-exit 1

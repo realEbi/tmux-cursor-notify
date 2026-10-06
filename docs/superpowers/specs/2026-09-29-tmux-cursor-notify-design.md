@@ -122,7 +122,7 @@ osascript -e 'tell application "<name>" to activate'
 
 ## Installer file
 
-`bin/install` reads and writes JSON with `jq` if it is on `PATH`, otherwise with `python3`. If neither is on `PATH`, it exits non-zero and does not write. Tests compare parsed JSON. Key order and whitespace are not specified.
+`bin/install` requires `jq` on `PATH` (macOS 15 and later ship `/usr/bin/jq`; otherwise install via Homebrew). If `jq` is missing, it prints `install: jq not found` on stderr, exits non-zero, and does not write. Tests compare parsed JSON. Key order and whitespace are not specified.
 
 If `~/.cursor/` does not exist, `bin/install` creates it with `mkdir -p` and then writes `hooks.json`. If `mkdir` fails, it exits non-zero and does not write a file.
 
@@ -143,18 +143,9 @@ The command string is the absolute path of this repo's `bin/notify-on-stop`.
 
 That path is `<dir>/notify-on-stop`, where `<dir>` is the directory of `bin/install` after resolving symlinks with `pwd -P`. It does not depend on the current working directory. `bin/focus-pane` in the click command is resolved the same way from `bin/notify-on-stop`.
 
-If the file exists and is valid JSON:
+If the file exists and is valid JSON, `jq` merges hook entries: set `version` to `1` when missing; refuse when `version` is present and is not the number `1` (print an `install:` error on stderr, exit non-zero, leave the file unchanged). Keep existing hook entries; append `{ "command": "<absolute path>" }` only when no entry has the same `command`. If `jq` cannot merge (invalid JSON, unsupported version, or other merge error), print an `install:` error on stderr, exit non-zero, and leave `hooks.json` unchanged.
 
-- If the root value is not an object, exit non-zero and do not write.
-- If `version` is missing, set it to `1`. If `version` is present and is not the number `1`, exit non-zero and do not write.
-- If `hooks` is missing, set it to `{}`. If `hooks` is present and is not an object, exit non-zero and do not write.
-- If `hooks.stop` is missing, set it to `[]`. If `hooks.stop` is present and is not an array, exit non-zero and do not write.
-- Keep every existing `stop` entry, including commands that point somewhere else and entries that are not objects.
-- An entry matches the duplicate check only when it is an object whose `command` string equals our absolute path. Other entries, including non-objects, are kept and do not match.
-- Append `{ "command": "<absolute path>" }` only when no entry matches.
-- Write the new JSON to a temporary file in `~/.cursor/`. On the `jq` path, replace `hooks.json` by running `mv` on that temp file. On the `python3` path, replace it with `os.replace`. If the write or the replace fails, exit non-zero. A failed replace leaves the previous `hooks.json` in place.
-
-If the file exists and is not valid JSON, exit non-zero and do not write.
+Write the new JSON to a temporary file in `~/.cursor/` and replace `hooks.json` with `mv`. If the write or `mv` fails, print an `install:` error, exit non-zero, remove any temp file, and leave the previous `hooks.json` in place when it existed.
 
 If `hooks.json` exists and is not a regular file, including when it is a directory, `bin/install` exits non-zero and leaves it untouched.
 
@@ -239,13 +230,12 @@ Installer tests use a temporary `HOME`. They compare parsed JSON:
 - A `stop` array containing a non-object (for example `null` or a string) keeps that element, appends our command, and exits 0.
 - When `hooks.json` exists as a directory, the installer exits non-zero and does not remove that directory.
 - When `~/.cursor` exists as a file, `mkdir` cannot create the directory, the installer exits non-zero, and it does not write `hooks.json`.
-- On the `jq` path, a fake `mv` that exits non-zero makes the installer exit non-zero and leaves the previous `hooks.json` contents in place.
+- A fake `mv` that exits non-zero makes the installer exit non-zero, leaves the previous `hooks.json` contents in place, and does not leave `hooks.json.*` temp files in `~/.cursor/`.
 - Running `bin/install` via a symlink, from a current directory that is not the repo, stores the symlink-resolved absolute path of `bin/notify-on-stop` in `command`.
 - A second run does not add a duplicate of our command.
 - Invalid JSON is left unchanged and the installer exits non-zero.
-- `version` other than the number `1`, a root value that is not an object, `hooks` not an object, or `hooks.stop` not an array: file unchanged, exit non-zero.
-- With `jq` absent and `python3` present, a missing file is still created.
-- With both `jq` and `python3` absent, the installer exits non-zero and does not write.
+- `version` present and not the number `1` (including boolean): file unchanged, exit non-zero, `install:` error on stderr.
+- With `jq` absent, the installer exits non-zero, prints `install: jq not found`, and does not write.
 
 One manual check, not automated: with the hook installed, finish a turn in `agent` while the terminal is not frontmost, confirm the notification, and confirm the click selects that pane. Repeat while the terminal is frontmost and that pane is selected, and confirm silence. Repeat while the terminal is frontmost but another pane, then another window, is selected, and confirm a notification each time. If this produces no notification even when the terminal is unfocused, `TMUX_PANE` is not reaching the hook.
 
@@ -280,7 +270,7 @@ One manual check, not automated: with the hook installed, finish a turn in `agen
 
 **Notification.** Title `Cursor needs approval`. Body: truncated command excerpt (80 chars) or workspace folder name. Group `cursor-<conversation_id>` (same as `stop`, so a finish notification replaces a pending approval). Sound `Glass`. Click runs `bin/focus-pane` via `terminal-notifier -execute`; `osascript display notification` fallback has no click action.
 
-**Installer.** `bin/install` idempotently merges `beforeShellExecution` and `beforeMCPExecution` entries pointing at `bin/notify-on-approval`, with `jq` or `python3`, keeping other hooks.
+**Installer.** `bin/install` idempotently merges `beforeShellExecution` and `beforeMCPExecution` entries pointing at `bin/notify-on-approval` using `jq`, keeping other hooks.
 
 **Tests.** `tests/run.sh` runs shell tests with fakes for `tmux`, `osascript`, `terminal-notifier`, and timing env vars.
 
