@@ -158,7 +158,34 @@ test_approval_wrapped_snippet_prefix() {
   assert_log_contains terminal-notifier 'Cursor needs approval'
 }
 
+test_approval_command_is_not_run() {
+  harness_use_fakes
+  export NOTIFY_APPROVAL_DELAY=0
+  export FAKE_OSA_NAME=Safari
+  local cmd="echo 'it' \$(touch $FAKE_LOG/ran)"
+  export FAKE_TMUX_CAPTURE=$'Run this command?\n'"$cmd"
+  run_hook "$(jq -nc --arg c "$cmd" '{command: $c, conversation_id: "c1"}')"
+  assert_stdout_trimmed '{}'
+  wait_for_notifier
+  assert_log_contains terminal-notifier "\$(touch"
+  if [ -e "$FAKE_LOG/ran" ]; then
+    echo "command from hook input was executed" >&2
+    exit 1
+  fi
+}
+
+test_approval_bad_json() {
+  harness_use_fakes
+  export NOTIFY_APPROVAL_DELAY=0
+  export FAKE_TMUX_CAPTURE=$'agent working'
+  run_hook 'not json'
+  assert_exit 0
+  assert_stdout_trimmed '{}'
+}
+
 run_tests \
+  test_approval_command_is_not_run \
+  test_approval_bad_json \
   test_approval_no_pane \
   test_approval_no_prompt \
   test_approval_shell_notifies \

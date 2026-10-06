@@ -338,26 +338,6 @@ test_notify_front_name_outside_list() {
   assert_log_lacks tmux 'display-message'
 }
 
-test_notify_bundle_quote_uses_name() {
-  harness_use_fakes
-  export __CFBundleIdentifier='a"b'
-  export FAKE_OSA_NAME=Safari
-  run_hook "$completed"
-  assert_log_contains osascript 'name of first application process'
-  assert_log_lacks osascript 'bundle identifier of first'
-  assert_log_contains terminal-notifier 'Cursor finished'
-}
-
-test_notify_bundle_backslash_uses_name() {
-  harness_use_fakes
-  export __CFBundleIdentifier='a\b'
-  export FAKE_OSA_NAME=Safari
-  run_hook "$completed"
-  assert_log_contains osascript 'name of first application process'
-  assert_log_lacks osascript 'bundle identifier of first'
-  assert_log_contains terminal-notifier 'Cursor finished'
-}
-
 test_notify_frontmost_query_fails() {
   harness_use_fakes
   export FAKE_OSA_EXIT=1
@@ -479,8 +459,6 @@ run_tests \
   test_notify_front_bundle_differs \
   test_notify_front_name_in_list \
   test_notify_front_name_outside_list \
-  test_notify_bundle_quote_uses_name \
-  test_notify_bundle_backslash_uses_name \
   test_notify_frontmost_query_fails \
   test_notify_pane_visible \
   test_notify_other_pane \

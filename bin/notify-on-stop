@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Cursor stop hook: notify when a CLI turn finishes in a tmux pane.
+. "$(cd "$(dirname "$0")" && pwd -P)/lib.sh"
 input=$(cat || true)
 
 finish() {
@@ -10,12 +11,6 @@ finish() {
 if [ -z "${TMUX_PANE-}" ]; then
   finish
 fi
-
-shell_quote() {
-  local escaped
-  escaped=${1//\'/\'\\\'\'}
-  printf "'%s'" "$escaped"
-}
 
 workspace_body() {
   local p=$1
@@ -137,64 +132,10 @@ PARSE
   body=$(workspace_body "$root")
 fi
 
-bin_dir=$(cd "$(dirname "$0")" && pwd -P)
-focus_pane="$bin_dir/focus-pane"
-bundle=${__CFBundleIdentifier-}
-socket=
-if [ -n "${TMUX-}" ]; then
-  socket=${TMUX%%,*}
-fi
-terminal_is_front() {
-  local bundle front
-  bundle=${__CFBundleIdentifier-}
-  if [ -n "$bundle" ] && ! printf '%s' "$bundle" | grep -q '["\\]'; then
-    front=$(osascript -e 'tell application "System Events" to get bundle identifier of first application process whose frontmost is true') || return 1
-    front=$(printf '%s' "$front" | sed 's/[[:space:]]*$//')
-    [ "$front" = "$bundle" ]
-    return
-  fi
-  front=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true') || return 1
-  front=$(printf '%s' "$front" | sed 's/[[:space:]]*$//')
-  case "$front" in
-    Terminal|iTerm2|Ghostty|WezTerm|kitty|Alacritty) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-pane_is_visible() {
-  local out socket fmt a b c
-  fmt='#{pane_active} #{window_active} #{session_attached}'
-  socket=
-  if [ -n "${TMUX-}" ]; then
-    socket=${TMUX%%,*}
-  fi
-  if [ -n "$socket" ]; then
-    out=$(tmux -S "$socket" display-message -p -t "$TMUX_PANE" "$fmt") || return 1
-  else
-    out=$(tmux display-message -p -t "$TMUX_PANE" "$fmt") || return 1
-  fi
-  out=$(printf '%s' "$out" | sed 's/[[:space:]]*$//')
-  # shellcheck disable=SC2086
-  set -- $out
-  [ "$#" -eq 3 ] || return 1
-  a=$1
-  b=$2
-  c=$3
-  [ "$a" = "1" ] && [ "$b" = "1" ] || return 1
-  printf '%s' "$c" | grep -Eq '^[0-9]+$' || return 1
-  [ "$c" -ge 1 ]
-}
-
-if terminal_is_front && pane_is_visible; then
+if terminal_is_front && pane_is_visible "$TMUX_PANE"; then
   finish
 fi
 
-exec_cmd="$(shell_quote "$focus_pane") $(shell_quote "$bundle") $(shell_quote "$socket") $(shell_quote "$TMUX_PANE")"
-
-if ! terminal-notifier -title "$title" -message "$body" -sound Glass -group "$group" -execute "$exec_cmd"; then
-  osascript -e 'on run argv
-  display notification (item 2 of argv) with title (item 1 of argv) sound name (item 3 of argv)
-end run' -- "$title" "$body" Glass || true
-fi
+notify "$title" "$body" "$group" "$TMUX_PANE"
 
 finish

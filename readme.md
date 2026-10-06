@@ -11,7 +11,7 @@ Both hooks skip notification when the terminal is the frontmost app and that sam
 ## Requirements
 
 - macOS, tmux, bash, and the Cursor CLI (`agent`) started inside a tmux pane so hooks inherit `TMUX` and `TMUX_PANE`.
-- `jq` for `bin/install` (ships with macOS 15 and later; otherwise `brew install jq`). `python3` or `perl` to detach the approval watcher (`perl` ships with macOS).
+- `jq` for `bin/install` and the approval hook (ships with macOS 15 and later; otherwise `brew install jq`). `perl` (ships with macOS) to start the approval watcher in the background.
 - Optional but recommended: `brew install terminal-notifier` for click-to-focus on notifications.
 - Notifications: System Settings → Notifications → **terminal-notifier** → allow notifications (banners or alerts, sound on). If you denied it earlier, reset with `tccutil reset UserNotification fr.julienxx.oss.terminal-notifier`, then trigger a notification to get the prompt again.
 - If `terminal-notifier` fails, the scripts fall back to `osascript display notification`, which cannot focus the pane on click. Allow **Script Editor** under Notifications for that path.

@@ -57,7 +57,7 @@ Run this only after the `TMUX_PANE` check has passed.
 
 Comparisons use `osascript` stdout with trailing whitespace removed, including the newline it prints. The same trim applies to the `true` / `false` results in Click.
 
-If `__CFBundleIdentifier` is set and non-empty, and it does not contain a double quote or a backslash:
+If `__CFBundleIdentifier` is set and non-empty:
 
 ```
 osascript -e 'tell application "System Events" to get bundle identifier of first application process whose frontmost is true'
@@ -65,7 +65,7 @@ osascript -e 'tell application "System Events" to get bundle identifier of first
 
 Stdout is the frontmost bundle id. If that stdout equals `__CFBundleIdentifier`, the terminal is frontmost. If `osascript` exits non-zero, the focus check failed.
 
-Otherwise (unset, empty, or contains `"` or `\`):
+Otherwise (unset or empty):
 
 ```
 osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true'
@@ -194,7 +194,6 @@ Hook tests run `bin/notify-on-stop` with fixture JSON on stdin and fakes earlier
 - A `status` other than `completed` or `error`, and a parsed object with a missing or non-string `status`, do not call the notifier.
 - When `__CFBundleIdentifier` is set, a matching frontmost bundle id does not call the notifier, and a different bundle id does.
 - When `__CFBundleIdentifier` is unset, a frontmost name in the name list does not call the notifier, and a name outside the list does.
-- When `__CFBundleIdentifier` contains a double quote or a backslash, the script uses the frontmost-name query and does not use the bundle-id query.
 - A failed frontmost check (fake `osascript` exits non-zero on the frontmost query) still calls the notifier.
 - Terminal frontmost and fake `tmux display-message` prints `1 1 1`: the notifier is not called.
 - Terminal frontmost and the pane is not visible: `0 1 1` (another pane active), `1 0 1` (another window active), and `1 1 0` (session not attached) each call the notifier.
@@ -254,9 +253,11 @@ One manual check, not automated: with the hook installed, finish a turn in `agen
 
 **Problem.** Cursor exposes no hook for “approval card is on screen.” The CLI draws the card in the tmux pane after `beforeShellExecution` / `beforeMCPExecution` return.
 
-**Approach.** Use those hooks as a trigger only: parse stdin for `conversation_id`, workspace root, and command or MCP tool snippet; print `{}` without `permission` so the hook abstains from the permission merge and does not change what Cursor allows. If `TMUX_PANE` is unset, exit immediately. Otherwise write a self-deleting temp worker script and spawn it detached (`python3` fork + `setsid`, `perl` fallback, `nohup` last resort), then return `{}` at once.
+**Approach.** Use those hooks as a trigger only: read `conversation_id` and the proposed `command` (shell) or `tool_name` (MCP) from stdin with `jq`; print `{}` without `permission` so the hook abstains from the permission merge and does not change what Cursor allows. If `TMUX_PANE` is unset, print `{}` and exit. Otherwise start the same script again as `notify-on-approval --watch <pane> <command> <group>`, forked by `perl` into its own session (`setsid`) with its output on `/dev/null`, so it outlives the hook and Cursor does not wait for it. Then print `{}` at once.
 
-**Polling.** After `NOTIFY_APPROVAL_DELAY` (default 0.4s), the worker loops at `NOTIFY_APPROVAL_INTERVAL` (default 0.5s), up to `NOTIFY_APPROVAL_POLLS` (default 240, ~2 minutes). Each iteration runs `tmux capture-pane` on the hook pane and inspects the last 15 lines.
+**Shared code.** `bin/lib.sh` holds what both notify scripts need: `tmux_cmd` (tmux on the agent's socket), `shell_quote`, `terminal_is_front`, `pane_is_visible`, and `notify` (terminal-notifier with click-to-focus, `osascript` fallback). Both scripts source it, which replaces the v1 rule that each script is standalone.
+
+**Polling.** After `NOTIFY_APPROVAL_DELAY` (default 0.4s), the watcher loops at `NOTIFY_APPROVAL_INTERVAL` (default 0.5s), up to `NOTIFY_APPROVAL_POLLS` (default 240, ~2 minutes). Each iteration runs `tmux capture-pane` on the hook pane and inspects the last 15 lines.
 
 **Timing rules.**
 
@@ -268,7 +269,7 @@ One manual check, not automated: with the hook installed, finish a turn in `agen
 
 **Suppression.** No notification while the user is frontmost on that pane. Same `terminal_is_front` / `pane_is_visible` helpers as `stop`.
 
-**Notification.** Title `Cursor needs approval`. Body: truncated command excerpt (80 chars) or workspace folder name. Group `cursor-<conversation_id>` (same as `stop`, so a finish notification replaces a pending approval). Sound `Glass`. Click runs `bin/focus-pane` via `terminal-notifier -execute`; `osascript display notification` fallback has no click action.
+**Notification.** Title `Cursor needs approval`. Body: the command or MCP tool name, cut to 80 characters, or `agent` when neither is present. Group `cursor-<conversation_id>` (same as `stop`, so a finish notification replaces a pending approval). Sound `Glass`. Click runs `bin/focus-pane` via `terminal-notifier -execute`; `osascript display notification` fallback has no click action.
 
 **Installer.** `bin/install` idempotently merges `beforeShellExecution` and `beforeMCPExecution` entries pointing at `bin/notify-on-approval` using `jq`, keeping other hooks.
 
