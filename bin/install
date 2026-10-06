@@ -31,6 +31,10 @@ if [ -s "$dest" ]; then
   current=$(cat "$dest") || fail "cannot read $dest"
 fi
 
+# Merge our hooks into the current file. For each event in the list, append
+# {"command": "<bin>/<script>"} unless that exact command is already there.
+# Other hooks and keys are kept. jq fails, leaving the file untouched, if the
+# version is not 1 or the file does not have the expected shape.
 merged=$(printf '%s' "$current" | jq --arg bin "$bin_dir" '
   def add($event; $cmd):
     .hooks[$event] |= ((. // []) | if any(.[]; .command? == $cmd) then . else . + [{command: $cmd}] end);
