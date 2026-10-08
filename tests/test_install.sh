@@ -133,7 +133,7 @@ test_install_appends() {
   printf '%s\n' '{"version":1,"hooks":{"stop":[{"command":"/bin/other"}]}}' > "$(hooks_path)"
   run_install
   assert_exit 0
-  python3 - "$(hooks_path)" "$STOP_EXPECTED" "$SHELL_EXPECTED" "$MCP_EXPECTED" <<'PY'
+  python3 - "$(hooks_path)" "$STOP_EXPECTED" "$SHELL_EXPECTED" "$MCP_EXPECTED" <<'PY' || exit 1
 import json, sys
 path, ours = sys.argv[1], sys.argv[2]
 with open(path) as handle:
@@ -162,7 +162,7 @@ test_install_keeps_non_object() {
   printf '%s\n' '{"hooks":{"stop":[null,"x"]}}' > "$(hooks_path)"
   run_install
   assert_exit 0
-  python3 - "$(hooks_path)" "$STOP_EXPECTED" <<'PY'
+  python3 - "$(hooks_path)" "$STOP_EXPECTED" <<'PY' || exit 1
 import json, sys
 path, ours = sys.argv[1], sys.argv[2]
 with open(path) as handle:
@@ -186,7 +186,7 @@ test_install_idempotent() {
   assert_exit 0
   run_install
   assert_exit 0
-  python3 - "$(hooks_path)" <<'PY'
+  python3 - "$(hooks_path)" <<'PY' || exit 1
 import json, sys
 with open(sys.argv[1]) as handle:
     data = json.load(handle)
@@ -206,7 +206,7 @@ test_install_registers_approval_idempotent() {
   assert_exit 0
   run_install
   assert_exit 0
-  python3 - "$(hooks_path)" <<'PY'
+  python3 - "$(hooks_path)" <<'PY' || exit 1
 import json, sys
 with open(sys.argv[1]) as handle:
     data = json.load(handle)
@@ -263,7 +263,7 @@ test_install_mv_fails() {
   export FAKE_MV_EXIT=1
   run_install
   assert_exit 1
-  python3 - "$(hooks_path)" <<'PY'
+  python3 - "$(hooks_path)" <<'PY' || exit 1
 import json, sys
 with open(sys.argv[1]) as handle:
     data = json.load(handle)
@@ -283,7 +283,7 @@ test_install_via_symlink() {
   set -e
   assert_exit 0
   assert_created
-  python3 - "$(hooks_path)" "$HOME" <<'PY'
+  python3 - "$(hooks_path)" "$HOME" <<'PY' || exit 1
 import json, sys
 path, home = sys.argv[1], sys.argv[2]
 with open(path) as handle:

@@ -4,6 +4,8 @@ set -u
 
 HARNESS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 ROOT=$(cd "$HARNESS_DIR/.." && pwd -P)
+# Panes a test started watchers for (see harness_track_pane).
+HARNESS_PANES=()
 
 harness_use_fakes() {
   FAKE_LOG=$(mktemp -d)
@@ -48,18 +50,59 @@ wait_quiet() {
   sleep "${1:-3}"
 }
 
-# Wait up to 5 seconds for the first terminal-notifier call.
-wait_for_notifier() {
-  local i=0
-  while [ "$i" -lt 50 ]; do
-    if [ -f "$FAKE_LOG/terminal-notifier" ]; then
-      return 0
+# wait_until SECONDS COMMAND...
+# Run COMMAND every 0.1 seconds until it succeeds. Fails once SECONDS of
+# wall-clock time have passed, however long each try took; the clock counts
+# whole seconds, so the limit is between SECONDS and one more.
+wait_until() {
+  local end=$((SECONDS + $1 + 1))
+  shift
+  while ! "$@"; do
+    if [ "$SECONDS" -ge "$end" ]; then
+      return 1
     fi
     sleep 0.1
-    i=$((i + 1))
   done
-  echo "timeout waiting for terminal-notifier" >&2
-  exit 1
+}
+
+# Count the lines in the fake tmux log that are exactly WORD.
+tmux_calls() {
+  local n=0
+  if [ -f "$FAKE_LOG/tmux" ]; then
+    n=$(grep -c -x -e "$1" "$FAKE_LOG/tmux")
+  fi
+  printf '%s\n' "${n:-0}"
+}
+
+tmux_called() {
+  [ "$(tmux_calls "$1")" -ge "$2" ]
+}
+
+# Wait up to 5 seconds for the first terminal-notifier call.
+wait_for_notifier() {
+  wait_until 5 test -f "$FAKE_LOG/terminal-notifier" || {
+    echo "timeout waiting for terminal-notifier" >&2
+    exit 1
+  }
+}
+
+# wait_for_polls N
+# Wait up to 5 seconds until N polls found you looking. Such a poll ends with
+# the pane check, which the fake tmux logs as a display-message line.
+wait_for_polls() {
+  wait_until 5 tmux_called display-message "$1" || {
+    echo "timeout waiting for $1 polls, saw $(tmux_calls display-message)" >&2
+    exit 1
+  }
+}
+
+# wait_for_captures N
+# Wait up to 5 seconds until the pane has been read N times.
+wait_for_captures() {
+  wait_until 5 tmux_called capture-pane "$1" || {
+    echo "timeout waiting for $1 capture-pane calls, saw $(tmux_calls capture-pane)" >&2
+    exit 1
+  }
 }
 
 run_capture() {
@@ -137,6 +180,45 @@ assert_notifier_calls() {
   fi
 }
 
+# notifier_arg FLAG [N]
+# Print the argument after FLAG in the Nth terminal-notifier call (default: the
+# first). The fake logs one argument per line, so it is the line after FLAG.
+notifier_arg() {
+  if [ -f "$FAKE_LOG/terminal-notifier" ]; then
+    awk -v flag="$1" -v want="${2:-1}" '
+      found { print; exit }
+      $0 == flag && ++n == want { found = 1 }
+    ' "$FAKE_LOG/terminal-notifier"
+  fi
+}
+
+# assert_notifier_arg FLAG VALUE [N]
+# The whole argument is compared, so text in another argument cannot match.
+assert_notifier_arg() {
+  local got
+  got=$(notifier_arg "$1" "${3:-1}")
+  if [ "$got" != "$2" ]; then
+    echo "terminal-notifier $1: expected [$2] got [$got]" >&2
+    if [ -f "$FAKE_LOG/terminal-notifier" ]; then
+      cat "$FAKE_LOG/terminal-notifier" >&2
+    fi
+    exit 1
+  fi
+}
+
+# assert_log_line LOG LINE
+# One whole line of the log is exactly LINE.
+assert_log_line() {
+  local file="$FAKE_LOG/$1"
+  if [ ! -f "$file" ] || ! grep -F -x -q -- "$2" "$file"; then
+    echo "log $1 has no line [$2]" >&2
+    if [ -f "$file" ]; then
+      cat "$file" >&2
+    fi
+    exit 1
+  fi
+}
+
 # Print the processes whose command line has both "--watch" and PANE as whole
 # arguments. Filtered in bash, so no helper process carries the pattern.
 harness_watchers() {
@@ -158,25 +240,66 @@ $listing
 EOF_PS
 }
 
+watcher_count_is() {
+  local found n=0
+  found=$(harness_watchers "$1") || return 1
+  if [ -n "$found" ]; then
+    n=$(printf '%s\n' "$found" | grep -c .)
+  fi
+  [ "$n" = "$2" ]
+}
+
+# Stop every watcher for PANE. A watcher leads its own process group, so the
+# sleep it waits on goes with it.
+harness_kill_watchers() {
+  local pid rest
+  while read -r pid rest; do
+    if [ -n "$pid" ]; then
+      kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null
+    fi
+  done <<EOF_KILL
+$(harness_watchers "$1")
+EOF_KILL
+}
+
+# harness_track_pane PANE
+# Remember a pane the test starts watchers for. run_tests stops any that are
+# left when the test ends, so a failing test leaks none.
+harness_track_pane() {
+  HARNESS_PANES+=("$1")
+}
+
+harness_cleanup() {
+  local pane
+  if [ "${#HARNESS_PANES[@]}" -gt 0 ]; then
+    for pane in "${HARNESS_PANES[@]}"; do
+      harness_kill_watchers "$pane"
+    done
+  fi
+}
+
+# wait_for_watchers PANE N
+# Wait up to 3 seconds until exactly N watchers run for PANE.
+wait_for_watchers() {
+  wait_until 3 watcher_count_is "$1" "$2" || {
+    echo "expected $2 watchers for pane $1, found:" >&2
+    harness_watchers "$1" >&2
+    exit 1
+  }
+}
+
 # assert_no_watchers PANE
-# No watcher for PANE is left running. Polls for about 3 seconds first, so a
-# watcher that is on its way out is not a failure.
+# No watcher for PANE is left running. Waits up to 3 seconds first, so a
+# watcher that is on its way out is not a failure. One that stays is stopped
+# before the test fails.
 assert_no_watchers() {
-  local pane="$1" i=0 found
-  while :; do
-    found=$(harness_watchers "$pane") || exit 1
-    if [ -z "$found" ]; then
-      return 0
-    fi
-    if [ "$i" -ge 30 ]; then
-      break
-    fi
-    sleep 0.1
-    i=$((i + 1))
-  done
-  echo "watcher still running for pane $pane:" >&2
-  printf '%s\n' "$found" >&2
-  exit 1
+  local pane="$1"
+  wait_until 3 watcher_count_is "$pane" 0 || {
+    echo "watcher still running for pane $pane:" >&2
+    harness_watchers "$pane" >&2
+    harness_kill_watchers "$pane"
+    exit 1
+  }
 }
 
 run_tests() {
@@ -185,6 +308,7 @@ run_tests() {
   for name in "$@"; do
     if (
       set -e
+      trap harness_cleanup EXIT
       "$name"
     ); then
       echo "PASS $name"

@@ -134,24 +134,91 @@ test_harness_wait_for_notifier() {
   wait
 }
 
+test_harness_notifier_arg() {
+  harness_use_fakes
+  [ -z "$(notifier_arg -message)" ] || { echo "notifier_arg printed something without a log" >&2; exit 1; }
+  terminal-notifier -title One -message 'app' -group g1 -execute "'/x/tmux-agent-notify/bin/focus-pane'"
+  terminal-notifier -title Two -message 'other' -group g2
+  assert_notifier_arg -title One
+  assert_notifier_arg -message app
+  assert_notifier_arg -group g2 2
+  assert_notifier_arg -message other 2
+  # A value that is only part of another argument does not match.
+  if (assert_notifier_arg -message agent) 2>/dev/null; then
+    echo "assert_notifier_arg matched text from another argument" >&2
+    exit 1
+  fi
+  if (assert_notifier_arg -message app 2) 2>/dev/null; then
+    echo "assert_notifier_arg read the wrong call" >&2
+    exit 1
+  fi
+  assert_log_line terminal-notifier other
+  if (assert_log_line terminal-notifier agent) 2>/dev/null; then
+    echo "assert_log_line matched part of a line" >&2
+    exit 1
+  fi
+}
+
+test_harness_wait_until() {
+  harness_use_fakes
+  (sleep 0.3; : > "$FAKE_LOG/late") &
+  wait_until 3 test -f "$FAKE_LOG/late" || { echo "wait_until missed the file" >&2; exit 1; }
+  wait
+  # The limit is wall-clock time: slow tries do not stretch it.
+  SECONDS=0
+  if wait_until 1 sh -c 'sleep 0.5; false'; then
+    echo "wait_until succeeded on a command that fails" >&2
+    exit 1
+  fi
+  [ "$SECONDS" -le 3 ] || { echo "wait_until took $SECONDS seconds for a 1 second limit" >&2; exit 1; }
+}
+
+test_harness_tmux_calls() {
+  harness_use_fakes
+  [ "$(tmux_calls capture-pane)" = 0 ] || { echo "expected no calls" >&2; exit 1; }
+  tmux capture-pane -p -t %1 >/dev/null
+  tmux capture-pane -p -t %1 >/dev/null
+  tmux display-message -p -t %1 fmt >/dev/null
+  [ "$(tmux_calls capture-pane)" = 2 ] || { echo "expected two capture-pane calls" >&2; exit 1; }
+  wait_for_captures 2
+  wait_for_polls 1
+}
+
 test_harness_no_watchers() {
   harness_use_fakes
   local pane="%h$$"
   assert_no_watchers "$pane"
   # Stands in for "bin/notify --watch <agent> <pane> ...". Exits within the grace period.
-  bash -c 'sleep 1' fake-notify --watch cursor "$pane" title &
+  bash -c 'sleep 1; :' fake-notify --watch cursor "$pane" title &
+  wait_for_watchers "$pane" 1
   assert_no_watchers "$pane"
   wait
-  # One that stays alive is reported.
+  # One that stays alive is reported within the time limit, and stopped.
   bash -c 'trap "kill %1" TERM; sleep 30 & wait' fake-notify --watch cursor "$pane" title &
   local pid=$!
   local ok=0
-  (assert_no_watchers "$pane") 2>/dev/null || ok=1
   # A different pane id that merely starts with the same text is not matched.
-  assert_no_watchers "${pane}9" || ok=0
-  kill "$pid" 2>/dev/null
+  assert_no_watchers "${pane}9"
+  SECONDS=0
+  (assert_no_watchers "$pane") 2>/dev/null || ok=1
+  [ "$ok" = 1 ] || { kill "$pid" 2>/dev/null; echo "assert_no_watchers missed a live watcher" >&2; exit 1; }
+  [ "$SECONDS" -le 5 ] || { echo "assert_no_watchers took $SECONDS seconds" >&2; exit 1; }
   wait "$pid" 2>/dev/null
-  [ "$ok" = 1 ] || { echo "assert_no_watchers missed a live watcher" >&2; exit 1; }
+  [ -z "$(harness_watchers "$pane")" ] || { echo "assert_no_watchers left the watcher running" >&2; exit 1; }
+}
+
+# run_tests stops the watchers of a tracked pane when a test ends.
+test_harness_cleanup_stops_watchers() {
+  harness_use_fakes
+  local pane="%k$$"
+  (
+    trap harness_cleanup EXIT
+    harness_track_pane "$pane"
+    bash -c 'trap "kill %1" TERM; sleep 30 & wait' fake-notify --watch cursor "$pane" title &
+    wait_for_watchers "$pane" 1
+    exit 1
+  ) || true
+  assert_no_watchers "$pane"
 }
 
 run_tests \
@@ -166,4 +233,8 @@ run_tests \
   test_harness_running_process_sees_change \
   test_harness_notifier_calls \
   test_harness_wait_for_notifier \
-  test_harness_no_watchers
+  test_harness_notifier_arg \
+  test_harness_wait_until \
+  test_harness_tmux_calls \
+  test_harness_no_watchers \
+  test_harness_cleanup_stops_watchers

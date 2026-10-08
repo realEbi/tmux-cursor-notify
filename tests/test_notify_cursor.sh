@@ -55,10 +55,10 @@ test_approval_shell_notifies() {
   assert_exit 0
   assert_stdout_trimmed '{}'
   wait_for_notifier
-  assert_log_contains terminal-notifier 'Cursor needs approval'
-  assert_log_contains terminal-notifier 'npm install deps'
-  assert_log_contains terminal-notifier 'cursor-c1'
-  assert_log_contains terminal-notifier 'Glass'
+  assert_notifier_arg -title 'Cursor needs approval'
+  assert_notifier_arg -message 'npm install deps'
+  assert_notifier_arg -group cursor-c1
+  assert_notifier_arg -sound Glass
   local fp
   fp=$(cd "$ROOT/bin" && pwd -P)/focus-pane
   assert_log_contains terminal-notifier "'$fp'"
@@ -72,8 +72,9 @@ test_approval_mcp_notifies() {
   export FAKE_TMUX_CAPTURE="$prompt_mcp"
   run_hook beforeMCPExecution "$mcp_json"
   wait_for_notifier
-  assert_log_contains terminal-notifier 'Cursor needs approval'
-  assert_log_contains terminal-notifier 'cursor-c1'
+  assert_notifier_arg -title 'Cursor needs approval'
+  assert_notifier_arg -message search_docs
+  assert_notifier_arg -group cursor-c1
 }
 
 test_approval_stale_prompt_skipped() {
@@ -98,7 +99,7 @@ test_approval_short_snippet_ok() {
   export FAKE_TMUX_CAPTURE=$'Run this command?\nAllow once\nls'
   run_hook beforeShellExecution '{"command":"ls","conversation_id":"c1"}'
   wait_for_notifier
-  assert_log_contains terminal-notifier 'Cursor needs approval'
+  assert_notifier_arg -title 'Cursor needs approval'
 }
 
 test_approval_visible_pane_silent() {
@@ -117,18 +118,19 @@ test_approval_returns_before_delay() {
   export NOTIFY_APPROVAL_DELAY=5
   export FAKE_TMUX_CAPTURE="$prompt_shell"
   export TMUX_PANE=%w7
+  harness_track_pane %w7
   # Avoid command substitution: bash waits for orphaned workers inside $().
+  set +e
   "$ROOT/bin/notify" cursor beforeShellExecution <<<"$shell_json" >"$FAKE_LOG/hook.stdout"
+  LAST_STATUS=$?
+  set -e
   LAST_STDOUT=$(cat "$FAKE_LOG/hook.stdout")
-  LAST_STATUS=0
   assert_exit 0
   assert_stdout_trimmed '{}'
   assert_not_called terminal-notifier
   # The watcher is still in its delay. Stop it so it does not outlive the test.
-  local pid rest
-  while read -r pid rest; do
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null
-  done <<<"$(harness_watchers %w7)"
+  wait_for_watchers %w7 1
+  harness_kill_watchers %w7
   assert_no_watchers %w7
 }
 
@@ -149,22 +151,20 @@ test_approval_body_is_folder_without_detail() {
   export FAKE_TMUX_CAPTURE="$prompt_shell"
   run_hook beforeShellExecution '{"conversation_id":"c1","workspace_roots":["/tmp/app/"]}'
   wait_for_notifier
-  assert_log_contains terminal-notifier 'Cursor needs approval'
-  [ "$(grep -A1 -x -e '-message' "$FAKE_LOG/terminal-notifier" | tail -n 1)" = app ] ||
-    { echo "body is not the folder" >&2; cat "$FAKE_LOG/terminal-notifier" >&2; exit 1; }
+  assert_notifier_arg -title 'Cursor needs approval'
+  assert_notifier_arg -message app
 }
 
 test_approval_long_body_cut() {
   harness_use_fakes
   export NOTIFY_APPROVAL_DELAY=0
   export FAKE_OSA_NAME=Safari
-  local cmd body
+  local cmd
   cmd=$(printf 'x%.0s' $(seq 1 100))
   export FAKE_TMUX_CAPTURE=$'Run this command?\n'"$cmd"
   run_hook beforeShellExecution "$(jq -nc --arg c "$cmd" '{command: $c, conversation_id: "c1"}')"
   wait_for_notifier
-  body=$(grep -A1 -x -e '-message' "$FAKE_LOG/terminal-notifier" | tail -n 1)
-  [ "$body" = "${cmd:0:79}…" ] || { echo "body not cut to 79 plus ellipsis: [$body]" >&2; exit 1; }
+  assert_notifier_arg -message "${cmd:0:79}…"
 }
 
 test_approval_non_object_payload() {
@@ -181,11 +181,13 @@ test_approval_non_object_payload() {
 }
 
 # The watcher tests below start with the card up and you looking at the pane.
-# watch_setup PANE sets that scene; a test may change the pacing before
-# watch_hook starts the watcher.
+# watch_setup PANE sets that scene; a test may change the scene or the pacing
+# before watch_hook starts the watcher. The time budget is far longer than any
+# test waits, so a watcher that exits did so for the reason under test.
 watch_setup() {
   harness_use_fakes
   export TMUX_PANE=$1
+  harness_track_pane "$1"
   export __CFBundleIdentifier=com.apple.Terminal
   fake_set osa-bundle com.apple.Terminal
   fake_set tmux-display '1 1 1'
@@ -194,50 +196,20 @@ watch_setup() {
   export NOTIFY_APPROVAL_INTERVAL=0.1
   export NOTIFY_APPROVAL_POLLS=1000
   export NOTIFY_APPROVAL_SLOW_INTERVAL=0.1
-  export NOTIFY_APPROVAL_MAX_SECONDS=5
+  export NOTIFY_APPROVAL_MAX_SECONDS=30
 }
 
+# watch_hook [JSON]
+# Not through run_capture: bash waits for orphaned workers inside $().
 watch_hook() {
-  "$ROOT/bin/notify" cursor beforeShellExecution <<<"$shell_json" >"$FAKE_LOG/hook.stdout"
+  local status=0
+  "$ROOT/bin/notify" cursor beforeShellExecution <<<"${1-$shell_json}" >"$FAKE_LOG/hook.stdout" || status=$?
+  [ "$status" = 0 ] || { echo "hook exited with $status" >&2; exit 1; }
+  [ "$(cat "$FAKE_LOG/hook.stdout")" = '{}' ] || { echo "hook did not print {}" >&2; exit 1; }
 }
 
 look_away() {
   fake_set osa-bundle com.example.Other
-}
-
-# wait_for_polls N
-# Wait up to 5 seconds until N polls found you looking. Such a poll ends with
-# the pane check, which the fake tmux logs as a display-message line.
-wait_for_polls() {
-  local i=0 n=0
-  while [ "$i" -lt 50 ]; do
-    n=$(grep -c -x -e 'display-message' "$FAKE_LOG/tmux" 2>/dev/null)
-    if [ "${n:-0}" -ge "$1" ]; then
-      return 0
-    fi
-    sleep 0.1
-    i=$((i + 1))
-  done
-  echo "timeout waiting for $1 polls, saw ${n:-0}" >&2
-  exit 1
-}
-
-# wait_for_watchers PANE N
-# Wait up to 3 seconds until exactly N watchers run for PANE.
-wait_for_watchers() {
-  local i=0 found n=0
-  while [ "$i" -lt 30 ]; do
-    found=$(harness_watchers "$1") || exit 1
-    n=0
-    [ -n "$found" ] && n=$(printf '%s\n' "$found" | grep -c .)
-    if [ "$n" = "$2" ]; then
-      return 0
-    fi
-    sleep 0.1
-    i=$((i + 1))
-  done
-  echo "expected $2 watchers for pane $1, found $n" >&2
-  exit 1
 }
 
 test_watch_look_then_away() {
@@ -247,8 +219,8 @@ test_watch_look_then_away() {
   assert_not_called terminal-notifier
   look_away
   wait_for_notifier
-  assert_log_contains terminal-notifier 'Cursor needs approval'
-  assert_log_contains terminal-notifier 'npm install deps'
+  assert_notifier_arg -title 'Cursor needs approval'
+  assert_notifier_arg -message 'npm install deps'
   assert_no_watchers %w1
   assert_notifier_calls 1
 }
@@ -258,6 +230,7 @@ test_watch_answered_then_away() {
   watch_hook
   wait_for_polls 2
   fake_set tmux-capture 'agent working'
+  # The watcher is gone before you look away, so nothing is left to notify.
   assert_no_watchers %w2
   look_away
   wait_quiet 0.5
@@ -275,14 +248,20 @@ test_watch_pane_gone() {
   assert_not_called terminal-notifier
 }
 
+# Two hooks for the same command: the first watcher stops while you are still
+# looking, and the one that is left notifies once.
 test_watch_second_replaces_first() {
+  local polls
   watch_setup %w4
   watch_hook
-  wait_for_polls 1
+  wait_for_polls 2
   wait_for_watchers %w4 1
   watch_hook
   wait_for_watchers %w4 1
-  wait_for_polls 4
+  # The watcher that is left is still polling.
+  polls=$(tmux_calls display-message)
+  wait_for_polls $((polls + 2))
+  assert_not_called terminal-notifier
   look_away
   wait_for_notifier
   wait_quiet 0.5
@@ -291,6 +270,75 @@ test_watch_second_replaces_first() {
   # The last watcher cleans up the pane file.
   [ -z "$(ls -A "$TMPDIR/tmux-agent-notify")" ] ||
     { echo "pane file left behind: $(ls -A "$TMPDIR/tmux-agent-notify")" >&2; exit 1; }
+}
+
+# The card shows up a few polls after the hook.
+test_watch_card_appears_later() {
+  watch_setup %w9
+  fake_set tmux-capture $'agent working\nno card yet'
+  look_away
+  watch_hook
+  wait_for_captures 3
+  assert_not_called terminal-notifier
+  fake_set tmux-capture "$prompt_shell"
+  wait_for_notifier
+  assert_notifier_arg -title 'Cursor needs approval'
+  assert_notifier_arg -message 'npm install deps'
+  assert_no_watchers %w9
+  assert_notifier_calls 1
+}
+
+# The card never shows up: the watcher stops after the appear polls, long
+# before the time budget.
+test_watch_card_never_appears() {
+  watch_setup %w10
+  export NOTIFY_APPROVAL_APPEAR_POLLS=5
+  fake_set tmux-capture $'agent working\nno card here'
+  look_away
+  watch_hook
+  assert_no_watchers %w10
+  [ "$(tmux_calls capture-pane)" = 5 ] ||
+    { echo "expected 5 capture-pane calls, saw $(tmux_calls capture-pane)" >&2; exit 1; }
+  fake_set tmux-capture "$prompt_shell"
+  wait_quiet 0.3
+  assert_not_called terminal-notifier
+}
+
+# The card for this very command is on screen, but above the last 15 lines.
+test_watch_card_above_window() {
+  watch_setup %w11
+  export NOTIFY_APPROVAL_APPEAR_POLLS=3
+  local pad=$prompt_shell i
+  for i in $(seq 1 16); do
+    pad=$pad$'\n'"pad-$i"
+  done
+  fake_set tmux-capture "$pad"
+  look_away
+  watch_hook
+  assert_no_watchers %w11
+  assert_not_called terminal-notifier
+  [ "$(tmux_calls capture-pane)" = 3 ] ||
+    { echo "expected 3 capture-pane calls, saw $(tmux_calls capture-pane)" >&2; exit 1; }
+}
+
+# Five quick polls, then one every ten seconds.
+test_watch_fast_then_slow() {
+  watch_setup %w12
+  export NOTIFY_APPROVAL_POLLS=5
+  export NOTIFY_APPROVAL_INTERVAL=0.1
+  export NOTIFY_APPROVAL_SLOW_INTERVAL=10
+  watch_hook
+  # Fast phase: with the slow interval, five polls would take 40 seconds.
+  wait_for_polls 5
+  # Slow phase: with the fast interval, 1.5 seconds would add several polls.
+  wait_quiet 1.5
+  [ "$(tmux_calls display-message)" -le 6 ] ||
+    { echo "slow phase polled $(tmux_calls display-message) times" >&2; exit 1; }
+  wait_for_watchers %w12 1
+  # The watcher is in a ten-second sleep. Stop it rather than wait.
+  harness_kill_watchers %w12
+  assert_no_watchers %w12
+  assert_not_called terminal-notifier
 }
 
 test_watch_budget_reached() {
@@ -309,13 +357,12 @@ test_watch_slow_phase_still_notifies() {
   watch_setup %w6
   export NOTIFY_APPROVAL_POLLS=1
   export NOTIFY_APPROVAL_SLOW_INTERVAL=0.1
-  export NOTIFY_APPROVAL_MAX_SECONDS=3
   watch_hook
   # Three polls: the fast phase is one poll long, so the rest are slow ones.
   wait_for_polls 3
   look_away
   wait_for_notifier
-  assert_log_contains terminal-notifier 'Cursor needs approval'
+  assert_notifier_arg -title 'Cursor needs approval'
   assert_no_watchers %w6
   assert_notifier_calls 1
 }
@@ -325,7 +372,6 @@ test_watch_hook_returns_while_watching() {
   SECONDS=0
   watch_hook
   [ "$SECONDS" -le 1 ] || { echo "hook took $SECONDS seconds" >&2; exit 1; }
-  [ "$(cat "$FAKE_LOG/hook.stdout")" = '{}' ] || { echo "hook did not print {}" >&2; exit 1; }
   wait_for_polls 2
   wait_for_watchers %w8 1
   fake_set tmux-capture 'agent working'
@@ -355,7 +401,7 @@ test_approval_wrapped_snippet_prefix() {
   export FAKE_TMUX_CAPTURE=$'Run this command?\nAllow once (y)\nnpm install very-long-\npackage-name-that-wraps'
   run_hook beforeShellExecution "$(printf '{"command":"%s","conversation_id":"c1"}' "$long_cmd")"
   wait_for_notifier
-  assert_log_contains terminal-notifier 'Cursor needs approval'
+  assert_notifier_arg -title 'Cursor needs approval'
 }
 
 test_approval_command_is_not_run() {
@@ -367,7 +413,7 @@ test_approval_command_is_not_run() {
   run_hook beforeShellExecution "$(jq -nc --arg c "$cmd" '{command: $c, conversation_id: "c1"}')"
   assert_stdout_trimmed '{}'
   wait_for_notifier
-  assert_log_contains terminal-notifier "\$(touch"
+  assert_notifier_arg -message "${cmd:0:79}…"
   if [ -e "$FAKE_LOG/ran" ]; then
     echo "command from hook input was executed" >&2
     exit 1
@@ -381,6 +427,10 @@ test_approval_bad_json() {
   run_hook beforeShellExecution 'not json'
   assert_exit 0
   assert_stdout_trimmed '{}'
+  # No watcher was started: nothing reads the pane.
+  wait_quiet 0.5
+  assert_not_called terminal-notifier
+  assert_log_lacks tmux 'capture-pane'
 }
 
 run_tests \
@@ -403,6 +453,10 @@ run_tests \
   test_watch_answered_then_away \
   test_watch_pane_gone \
   test_watch_second_replaces_first \
+  test_watch_card_appears_later \
+  test_watch_card_never_appears \
+  test_watch_card_above_window \
+  test_watch_fast_then_slow \
   test_watch_budget_reached \
   test_watch_slow_phase_still_notifies \
   test_watch_hook_returns_while_watching \

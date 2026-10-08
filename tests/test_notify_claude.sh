@@ -30,10 +30,12 @@ pane_working=$'⏺ Bash(sleep 30)\n  ⎿  Running…\n\n✻ Working… (12s)\n\n
 
 # The watcher tests start with you looking at the pane and an approval on
 # screen. watch_setup PANE sets that scene; a test may change it before
-# watch_hook starts the watcher.
+# watch_hook starts the watcher. The time budget is far longer than any test
+# waits, so a watcher that exits did so for the reason under test.
 watch_setup() {
   harness_use_fakes
   export TMUX_PANE=$1
+  harness_track_pane "$1"
   export __CFBundleIdentifier=com.apple.Terminal
   fake_set osa-bundle com.apple.Terminal
   fake_set tmux-display '1 1 1'
@@ -41,73 +43,20 @@ watch_setup() {
   export NOTIFY_APPROVAL_INTERVAL=0.1
   export NOTIFY_APPROVAL_POLLS=1000
   export NOTIFY_APPROVAL_SLOW_INTERVAL=0.1
-  export NOTIFY_APPROVAL_MAX_SECONDS=5
+  export NOTIFY_APPROVAL_MAX_SECONDS=30
 }
 
 # watch_hook [JSON]
 # Not through run_capture: bash waits for orphaned workers inside $().
 watch_hook() {
-  "$ROOT/bin/notify" claude Notification <<<"${1-$prompt_json}" >"$FAKE_LOG/hook.stdout"
+  local status=0
+  "$ROOT/bin/notify" claude Notification <<<"${1-$prompt_json}" >"$FAKE_LOG/hook.stdout" || status=$?
+  [ "$status" = 0 ] || { echo "hook exited with $status" >&2; exit 1; }
   [ "$(cat "$FAKE_LOG/hook.stdout")" = '{}' ] || { echo "hook did not print {}" >&2; exit 1; }
 }
 
 look_away() {
   fake_set osa-bundle com.example.Other
-}
-
-# Count the lines in the fake tmux log that are exactly WORD.
-tmux_calls() {
-  local n=0
-  if [ -f "$FAKE_LOG/tmux" ]; then
-    n=$(grep -c -x -e "$1" "$FAKE_LOG/tmux")
-  fi
-  printf '%s\n' "${n:-0}"
-}
-
-# wait_for_polls N
-# Wait up to 5 seconds until N polls found you looking. Such a poll ends with
-# the pane check, which the fake tmux logs as a display-message line.
-wait_for_polls() {
-  local i=0 n=0
-  while [ "$i" -lt 50 ]; do
-    n=$(tmux_calls display-message)
-    if [ "$n" -ge "$1" ]; then
-      return 0
-    fi
-    sleep 0.1
-    i=$((i + 1))
-  done
-  echo "timeout waiting for $1 polls, saw $n" >&2
-  exit 1
-}
-
-# Wait up to 5 seconds until the watcher has read the pane once.
-wait_for_capture() {
-  local i=0
-  while [ "$i" -lt 50 ]; do
-    if [ "$(tmux_calls capture-pane)" -ge 1 ]; then
-      return 0
-    fi
-    sleep 0.1
-    i=$((i + 1))
-  done
-  echo "timeout waiting for capture-pane" >&2
-  exit 1
-}
-
-# The line after -message in the notifier log, for the first notification.
-notifier_body() {
-  grep -A1 -x -e '-message' "$FAKE_LOG/terminal-notifier" | sed -n 2p
-}
-
-assert_body() {
-  local got
-  got=$(notifier_body)
-  [ "$got" = "$1" ] || {
-    echo "body: expected [$1] got [$got]" >&2
-    cat "$FAKE_LOG/terminal-notifier" >&2
-    exit 1
-  }
 }
 
 expect_silent() {
@@ -121,7 +70,7 @@ expect_silent() {
 # The watcher reads the pane once, finds no prompt and stops, although you are
 # away. A prompt that shows up afterwards is not its business any more.
 expect_not_a_prompt() {
-  wait_for_capture
+  wait_for_captures 1
   assert_no_watchers "$1"
   fake_set tmux-capture "$pane_approval"
   wait_quiet 0.3
@@ -149,9 +98,9 @@ test_claude_stop() {
   assert_exit 0
   assert_stdout_trimmed '{}'
   assert_notifier_calls 1
-  assert_log_contains terminal-notifier 'Claude finished'
-  assert_body app
-  assert_log_contains terminal-notifier 'claude-s1'
+  assert_notifier_arg -title 'Claude finished'
+  assert_notifier_arg -message app
+  assert_notifier_arg -group claude-s1
   assert_log_contains terminal-notifier "'%12'"
   assert_log_lacks tmux 'capture-pane'
 }
@@ -162,9 +111,9 @@ test_claude_stop_failure() {
   assert_exit 0
   assert_stdout_trimmed '{}'
   assert_notifier_calls 1
-  assert_log_contains terminal-notifier 'Claude hit an error'
-  assert_body app
-  assert_log_contains terminal-notifier 'claude-s1'
+  assert_notifier_arg -title 'Claude hit an error'
+  assert_notifier_arg -message app
+  assert_notifier_arg -group claude-s1
 }
 
 test_claude_stop_while_looking() {
@@ -188,9 +137,9 @@ test_claude_prompt_away() {
   look_away
   watch_hook
   wait_for_notifier
-  assert_log_contains terminal-notifier 'Claude is waiting for you'
-  assert_body app
-  assert_log_contains terminal-notifier 'claude-s1'
+  assert_notifier_arg -title 'Claude is waiting for you'
+  assert_notifier_arg -message app
+  assert_notifier_arg -group claude-s1
   assert_log_contains terminal-notifier "'%c1'"
   assert_log_contains terminal-notifier "'/tmp/sock'"
   assert_no_watchers %c1
@@ -203,9 +152,9 @@ test_claude_question_away() {
   look_away
   watch_hook
   wait_for_notifier
-  assert_log_contains terminal-notifier 'Claude is waiting for you'
-  assert_body app
-  assert_log_contains terminal-notifier 'claude-s1'
+  assert_notifier_arg -title 'Claude is waiting for you'
+  assert_notifier_arg -message app
+  assert_notifier_arg -group claude-s1
   assert_no_watchers %c2
   assert_notifier_calls 1
 }
@@ -216,7 +165,7 @@ test_claude_subagent_prompt_away() {
   look_away
   watch_hook
   wait_for_notifier
-  assert_log_contains terminal-notifier 'Claude is waiting for you'
+  assert_notifier_arg -title 'Claude is waiting for you'
   assert_no_watchers %c3
   assert_notifier_calls 1
 }
@@ -228,8 +177,8 @@ test_claude_look_then_away() {
   assert_not_called terminal-notifier
   look_away
   wait_for_notifier
-  assert_log_contains terminal-notifier 'Claude is waiting for you'
-  assert_body app
+  assert_notifier_arg -title 'Claude is waiting for you'
+  assert_notifier_arg -message app
   assert_no_watchers %c4
   assert_notifier_calls 1
 }
@@ -239,6 +188,7 @@ test_claude_answered_then_away() {
   watch_hook
   wait_for_polls 2
   fake_set tmux-capture "$pane_working"
+  # The watcher is gone before you look away, so nothing is left to notify.
   assert_no_watchers %c5
   look_away
   wait_quiet 0.5
@@ -278,7 +228,7 @@ test_claude_trailing_blank_lines() {
   look_away
   watch_hook
   wait_for_notifier
-  assert_log_contains terminal-notifier 'Claude is waiting for you'
+  assert_notifier_arg -title 'Claude is waiting for you'
   assert_no_watchers %c9
   assert_notifier_calls 1
 }
@@ -307,9 +257,8 @@ test_claude_no_session() {
   look_away
   watch_hook '{"cwd":"/tmp/app","hook_event_name":"Notification","notification_type":"permission_prompt"}'
   wait_for_notifier
-  assert_log_contains terminal-notifier 'Claude is waiting for you'
-  [ "$(grep -A1 -x -e '-group' "$FAKE_LOG/terminal-notifier" | sed -n 2p)" = claude-unknown ] ||
-    { echo "group is not claude-unknown" >&2; cat "$FAKE_LOG/terminal-notifier" >&2; exit 1; }
+  assert_notifier_arg -title 'Claude is waiting for you'
+  assert_notifier_arg -group claude-unknown
   assert_no_watchers %c11
 }
 
@@ -318,18 +267,18 @@ test_claude_no_cwd() {
   look_away
   watch_hook '{"session_id":"s1","hook_event_name":"Notification","notification_type":"permission_prompt"}'
   wait_for_notifier
-  assert_body agent
+  assert_notifier_arg -message agent
   assert_no_watchers %c12
 
   harness_use_fakes
   run_hook Stop '{"session_id":"s1","cwd":"","hook_event_name":"Stop"}'
-  assert_log_contains terminal-notifier 'Claude finished'
-  assert_body agent
+  assert_notifier_arg -title 'Claude finished'
+  assert_notifier_arg -message agent
 
   harness_use_fakes
   run_hook Stop '{"session_id":7,"cwd":7,"hook_event_name":"Stop"}'
-  assert_body agent
-  assert_log_contains terminal-notifier 'claude-unknown'
+  assert_notifier_arg -message agent
+  assert_notifier_arg -group claude-unknown
 }
 
 test_claude_unknown_event() {
@@ -355,6 +304,12 @@ test_claude_bad_json() {
       run_hook "$event" "$json"
       expect_silent
       assert_not_called tmux
+      # No watcher was started: nothing reads the pane later either.
+      if [ "$event" = Notification ]; then
+        wait_quiet 0.3
+        assert_not_called terminal-notifier
+        assert_not_called tmux
+      fi
     done
   done
 }
@@ -386,16 +341,15 @@ test_claude_cwd_is_not_run() {
   json=$(jq -nc --arg d "$cwd" '{session_id: "s1", cwd: $d, hook_event_name: "Stop"}')
   run_capture "$ROOT/bin/notify" claude Stop <<<"$json"
   assert_stdout_trimmed '{}'
-  assert_body "it's \$(touch ran) \`touch ran\`"
+  assert_notifier_arg -message "it's \$(touch ran) \`touch ran\`"
 
   json=$(jq -nc --arg d "$cwd" --arg s "s'1 \$(touch ran)" \
     '{session_id: $s, cwd: $d, notification_type: "permission_prompt"}')
   watch_hook "$json"
   assert_no_watchers %c13
   assert_notifier_calls 2
-  [ "$(grep -c -F -x "it's \$(touch ran) \`touch ran\`" "$FAKE_LOG/terminal-notifier")" = 2 ] ||
-    { echo "cwd is not the body of both notifications" >&2; cat "$FAKE_LOG/terminal-notifier" >&2; exit 1; }
-  assert_log_contains terminal-notifier "claude-s'1 \$(touch ran)"
+  assert_notifier_arg -message "it's \$(touch ran) \`touch ran\`" 2
+  assert_notifier_arg -group "claude-s'1 \$(touch ran)" 2
   if [ -e "$FAKE_LOG/ran" ]; then
     echo "text from hook input was executed" >&2
     exit 1

@@ -19,57 +19,54 @@ test_notify_completed() {
   run_hook "$completed"
   assert_exit 0
   assert_stdout_trimmed '{}'
-  assert_log_contains terminal-notifier '-title'
-  assert_log_contains terminal-notifier 'Cursor finished'
-  assert_log_contains terminal-notifier '-message'
-  assert_log_contains terminal-notifier 'app'
-  assert_log_contains terminal-notifier '-sound'
-  assert_log_contains terminal-notifier 'Glass'
-  assert_log_contains terminal-notifier '-group'
-  assert_log_contains terminal-notifier 'cursor-c1'
+  assert_notifier_calls 1
+  assert_notifier_arg -title 'Cursor finished'
+  assert_notifier_arg -message app
+  assert_notifier_arg -sound Glass
+  assert_notifier_arg -group cursor-c1
 }
 
 test_notify_error() {
   harness_use_fakes
   run_hook '{"status":"error","conversation_id":"c1","workspace_roots":["/tmp/app"]}'
   assert_exit 0
-  assert_log_contains terminal-notifier 'Cursor hit an error'
+  assert_notifier_arg -title 'Cursor hit an error'
 }
 
 test_notify_body_trailing_slash() {
   harness_use_fakes
   run_hook '{"status":"completed","workspace_roots":["/tmp/app/"]}'
-  assert_log_contains terminal-notifier 'app'
+  assert_notifier_arg -message app
 }
 
 test_notify_body_root() {
   harness_use_fakes
   run_hook '{"status":"completed","workspace_roots":["/"]}'
-  assert_log_contains terminal-notifier 'agent'
+  assert_notifier_arg -message agent
 }
 
 test_notify_body_missing() {
   harness_use_fakes
   run_hook '{"status":"completed"}'
-  assert_log_contains terminal-notifier 'agent'
+  assert_notifier_arg -message agent
 }
 
 test_notify_body_empty_list() {
   harness_use_fakes
   run_hook '{"status":"completed","workspace_roots":[]}'
-  assert_log_contains terminal-notifier 'agent'
+  assert_notifier_arg -message agent
 }
 
 test_notify_body_empty_string() {
   harness_use_fakes
   run_hook '{"status":"completed","workspace_roots":[""]}'
-  assert_log_contains terminal-notifier 'agent'
+  assert_notifier_arg -message agent
 }
 
 test_notify_body_number() {
   harness_use_fakes
   run_hook '{"status":"completed","workspace_roots":[1]}'
-  assert_log_contains terminal-notifier 'agent'
+  assert_notifier_arg -message agent
 }
 
 test_notify_group() {
@@ -77,8 +74,9 @@ test_notify_group() {
   run_hook '{"status":"completed","conversation_id":"c1"}'
   run_hook '{"status":"completed","conversation_id":"c1"}'
   run_hook '{"status":"completed","conversation_id":"c2"}'
-  assert_log_contains terminal-notifier 'cursor-c1'
-  assert_log_contains terminal-notifier 'cursor-c2'
+  assert_notifier_arg -group cursor-c1 1
+  assert_notifier_arg -group cursor-c1 2
+  assert_notifier_arg -group cursor-c2 3
 }
 
 test_notify_group_unknown() {
@@ -86,14 +84,10 @@ test_notify_group_unknown() {
   run_hook '{"status":"completed"}'
   run_hook '{"status":"completed","conversation_id":""}'
   run_hook '{"status":"completed","conversation_id":1}'
-  assert_log_contains terminal-notifier 'cursor-unknown'
-  if grep -c -F -x 'cursor-unknown' "$FAKE_LOG/terminal-notifier" | grep -qx 3; then
-    :
-  else
-    echo "expected three cursor-unknown lines" >&2
-    cat "$FAKE_LOG/terminal-notifier" >&2
-    exit 1
-  fi
+  assert_notifier_calls 3
+  assert_notifier_arg -group cursor-unknown 1
+  assert_notifier_arg -group cursor-unknown 2
+  assert_notifier_arg -group cursor-unknown 3
 }
 
 test_notify_execute_parts() {
@@ -192,7 +186,7 @@ test_notify_folder_is_not_run() {
   local root="/tmp/it's \$(touch ran)"
   cd "$FAKE_LOG" || exit 1
   run_hook "$(jq -nc --arg r "$root" '{status: "completed", conversation_id: "c1", workspace_roots: [$r]}')"
-  assert_log_contains terminal-notifier "it's \$(touch ran)"
+  assert_notifier_arg -message "it's \$(touch ran)"
   if [ -e "$FAKE_LOG/ran" ]; then
     echo "workspace path from hook input was executed" >&2
     exit 1
@@ -243,8 +237,8 @@ test_notify_fallback_missing_notifier() {
   run_hook "$completed"
   assert_log_contains osascript 'display notification'
   assert_log_contains osascript 'Glass'
-  assert_log_contains osascript 'Cursor finished'
-  assert_log_contains osascript 'app'
+  assert_log_line osascript 'Cursor finished'
+  assert_log_line osascript app
   assert_log_lacks osascript '-execute'
   assert_log_lacks osascript 'focus-pane'
 }
@@ -263,7 +257,7 @@ test_notify_fallback_quote_body() {
   harness_use_fakes
   export FAKE_NOTIFIER_EXIT=1
   run_hook '{"status":"completed","workspace_roots":["/tmp/say\"hi"]}'
-  assert_log_contains osascript 'say"hi'
+  assert_log_line osascript 'say"hi'
   if grep -F 'on run argv' "$FAKE_LOG/osascript" | grep -F 'say"hi' >/dev/null; then
     echo "body was interpolated into the AppleScript" >&2
     exit 1
@@ -314,7 +308,7 @@ test_notify_front_bundle_differs() {
   export __CFBundleIdentifier=com.apple.Terminal
   export FAKE_OSA_BUNDLE=com.example.Other
   run_hook "$completed"
-  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_notifier_arg -title 'Cursor finished'
   assert_log_lacks tmux 'display-message'
 }
 
@@ -330,7 +324,7 @@ test_notify_front_name_outside_list() {
   harness_use_fakes
   export FAKE_OSA_NAME=Safari
   run_hook "$completed"
-  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_notifier_arg -title 'Cursor finished'
   assert_log_lacks tmux 'display-message'
 }
 
@@ -339,7 +333,7 @@ test_notify_frontmost_query_fails() {
   export FAKE_OSA_EXIT=1
   export __CFBundleIdentifier=com.apple.Terminal
   run_hook "$completed"
-  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_notifier_arg -title 'Cursor finished'
 }
 
 test_notify_pane_visible() {
@@ -355,7 +349,7 @@ test_notify_other_pane() {
   export FAKE_OSA_NAME=Terminal
   export FAKE_TMUX_DISPLAY='0 1 1'
   run_hook "$completed"
-  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_notifier_arg -title 'Cursor finished'
 }
 
 test_notify_other_window() {
@@ -363,7 +357,7 @@ test_notify_other_window() {
   export FAKE_OSA_NAME=Terminal
   export FAKE_TMUX_DISPLAY='1 0 1'
   run_hook "$completed"
-  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_notifier_arg -title 'Cursor finished'
 }
 
 test_notify_session_detached() {
@@ -371,7 +365,7 @@ test_notify_session_detached() {
   export FAKE_OSA_NAME=Terminal
   export FAKE_TMUX_DISPLAY='1 1 0'
   run_hook "$completed"
-  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_notifier_arg -title 'Cursor finished'
 }
 
 test_notify_session_attached_two() {
@@ -387,7 +381,7 @@ test_notify_pane_check_fails() {
   export FAKE_OSA_NAME=Terminal
   export FAKE_TMUX_DISPLAY_EXIT=1
   run_hook "$completed"
-  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_notifier_arg -title 'Cursor finished'
 }
 
 test_notify_pane_check_garbage() {
@@ -395,7 +389,7 @@ test_notify_pane_check_garbage() {
   export FAKE_OSA_NAME=Terminal
   export FAKE_TMUX_DISPLAY='visible'
   run_hook "$completed"
-  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_notifier_arg -title 'Cursor finished'
 }
 
 test_notify_pane_check_socket() {
@@ -414,7 +408,7 @@ test_notify_not_frontmost_skips_pane_check() {
   harness_use_fakes
   export FAKE_OSA_NAME=Safari
   run_hook "$completed"
-  assert_log_contains terminal-notifier 'Cursor finished'
+  assert_notifier_arg -title 'Cursor finished'
   assert_log_lacks tmux 'display-message'
 }
 
