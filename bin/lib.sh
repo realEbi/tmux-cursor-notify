@@ -10,6 +10,16 @@ tmux_cmd() {
   fi
 }
 
+# Source the adapter for an agent. The name becomes part of a path, so only
+# lowercase letters are accepted. Fails when there is no such adapter.
+load_adapter() {
+  case $1 in
+    '' | *[!abcdefghijklmnopqrstuvwxyz]*) return 1 ;;
+  esac
+  [ -f "$LIB_DIR/agents/$1.sh" ] || return 1
+  . "$LIB_DIR/agents/$1.sh"
+}
+
 shell_quote() {
   local escaped=${1//\'/\'\\\'\'}
   printf "'%s'" "$escaped"
@@ -47,4 +57,37 @@ notify() {
     osascript -e 'on run argv
   display notification (item 2 of argv) with title (item 1 of argv) sound name (item 3 of argv)
 end run' -- "$title" "$body" Glass || true
+}
+
+# One watcher per pane. The newest watcher writes its process id to the pane
+# file, and an older one stops when it reads another id there. PANE_FILE stays
+# empty when the file cannot be written; the watcher then runs without the check.
+PANE_FILE=
+
+# Take over the pane. Pane ids look like %12; any other character is replaced,
+# so the id cannot point outside the directory.
+pane_claim() {
+  local dir="${TMPDIR:-/tmp}/tmux-agent-notify" file
+  file="$dir/pane-${1//[!%A-Za-z0-9]/_}"
+  { mkdir -p "$dir" && printf '%s\n' "$$" >"$file"; } 2>/dev/null || return 0
+  PANE_FILE=$file
+}
+
+# True when another watcher has taken over the pane. A file that is missing or
+# unreadable does not count: a duplicate is better than no notification.
+pane_taken() {
+  local holder=
+  [ -n "$PANE_FILE" ] || return 1
+  { read -r holder <"$PANE_FILE"; } 2>/dev/null || return 1
+  [ -n "$holder" ] && [ "$holder" != "$$" ]
+}
+
+# Remove the pane file when it still holds this watcher's id.
+pane_release() {
+  local holder=
+  [ -n "$PANE_FILE" ] || return 0
+  { read -r holder <"$PANE_FILE"; } 2>/dev/null || return 0
+  if [ "$holder" = "$$" ]; then
+    rm -f "$PANE_FILE"
+  fi
 }

@@ -3,16 +3,63 @@
 # The adapter in agents/<agent>.sh reads the payload; this script decides
 # whether to notify. Always answers {}, so the agent carries on as usual.
 . "$(cd "$(dirname "$0")" && pwd -P)/lib.sh"
+
+# Background watcher: wait for the agent's prompt, then notify once you look away.
+# Stops quietly when the prompt goes away, the pane cannot be read, a newer
+# watcher takes over the pane, or time runs out.
+watch() {
+  local agent=${1-} pane=${2-} title=${3-} body=${4-} group=${5-} detail=${6-}
+  local interval=${NOTIFY_APPROVAL_INTERVAL:-0.5}
+  local slow=${NOTIFY_APPROVAL_SLOW_INTERVAL:-2}
+  local polls=${NOTIFY_APPROVAL_POLLS:-240}
+  local appear=${NOTIFY_APPROVAL_APPEAR_POLLS:-40}
+  local max=${NOTIFY_APPROVAL_MAX_SECONDS:-3600}
+  local seen=0 i=0 screen
+
+  load_adapter "$agent" || return 0
+  SECONDS=0
+  trap pane_release EXIT
+  pane_claim "$pane"
+
+  if [ "${AGENT_PROMPT_APPEARS_LATER-}" = 1 ]; then
+    sleep "${NOTIFY_APPROVAL_DELAY:-0.4}"
+  else
+    # The prompt is up already, so a pane without it means the wait is over.
+    seen=1
+  fi
+  while [ "$SECONDS" -lt "$max" ]; do
+    pane_taken && return 0
+    # A pane that cannot be read is gone, and so is its prompt.
+    screen=$(tmux_cmd capture-pane -p -t "$pane" 2>/dev/null) || return 0
+    if agent_prompt_on_screen "$screen" "$detail"; then
+      seen=1
+      if ! terminal_is_front || ! pane_is_visible "$pane"; then
+        notify "$title" "$body" "$group" "$pane"
+        return 0
+      fi
+    elif [ "$seen" = 1 ] || [ $((i + 1)) -ge "$appear" ]; then
+      return 0
+    fi
+    # Poll fast at first, then slowly for as long as the prompt stays up.
+    i=$((i + 1))
+    if [ "$i" -lt "$polls" ]; then
+      sleep "$interval"
+    else
+      sleep "$slow"
+    fi
+  done
+}
+
+if [ "${1-}" = --watch ]; then
+  shift
+  watch "$@"
+  exit 0
+fi
+
 agent=${1-} event=${2-}
 input=$(cat)
 
-# The agent name becomes part of a path, so only lowercase letters are accepted.
-case $agent in
-  '' | *[!abcdefghijklmnopqrstuvwxyz]*) agent= ;;
-esac
-
-if [ -n "${TMUX_PANE-}" ] && [ -n "$agent" ] && [ -f "$LIB_DIR/agents/$agent.sh" ]; then
-  . "$LIB_DIR/agents/$agent.sh"
+if [ -n "${TMUX_PANE-}" ] && load_adapter "$agent"; then
   kind= session= folder= detail= title=
   agent_parse "$event" "$input"
 
@@ -29,6 +76,14 @@ if [ -n "${TMUX_PANE-}" ] && [ -n "$agent" ] && [ -f "$LIB_DIR/agents/$agent.sh"
       if ! { terminal_is_front && pane_is_visible "$TMUX_PANE"; }; then
         notify "$title" "${folder:-agent}" "$group" "$TMUX_PANE"
       fi
+      ;;
+    attention)
+      body=${detail:-${folder:-agent}}
+      [ "${#body}" -gt 80 ] && body="${body:0:79}…"
+      # Run this script again as the watcher, in its own session so it outlives
+      # the hook. Its output goes to /dev/null so the agent does not wait for it.
+      perl -MPOSIX -e 'defined(my $pid = fork) or exit 1; if ($pid) { exit } setsid; exec @ARGV' \
+        "$0" --watch "$agent" "$TMUX_PANE" "$title" "$body" "$group" "$detail" </dev/null >/dev/null 2>&1
       ;;
   esac
 fi
