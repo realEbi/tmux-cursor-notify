@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Add this checkout's hooks to ~/.cursor/hooks.json, keeping any other hooks.
+# Add this checkout's hooks to each agent's config file, keeping any other hooks.
+# Usage: install [agent...]. With no arguments: every agent whose config
+# directory exists.
 resolve_dir() {
   local source=$1
   while [ -L "$source" ]; do
@@ -20,35 +22,107 @@ fail() {
 }
 
 bin_dir=$(resolve_dir "$0")
-cursor_dir=$HOME/.cursor
-dest=$cursor_dir/hooks.json
+. "$bin_dir/lib.sh"
+
+# Merge the hooks into the current file, read from stdin. $notify is the path
+# as it is written in the command, and $hooks is the output of agent_hooks.
+# First remove the entries an earlier install left, under every event. Then,
+# for each hook, append an entry unless one with that exact command is there.
+# Other hooks and keys are kept. jq fails, leaving the file untouched, when the
+# file does not have the expected shape.
+merge='
+  # True for an entry whose command an earlier install wrote: the old scripts,
+  # or notify in another checkout of this tool. Single quotes are ignored.
+  # The form written now is never stale.
+  def stale:
+    ($bin | gsub($quote; "")) as $here
+    | (.command? | strings | select(startswith($notify + " ") | not) | gsub($quote; "")
+       | . == $here + "/notify-on-stop" or . == $here + "/notify-on-approval"
+         or test("^/.*/tmux-cursor-notify/bin/notify-on-(stop|approval)$")
+         or ((capture("^(?<bin>/(.*/)?tmux-(cursor|agent)-notify/bin)/notify [a-z]+ [A-Za-z]+$")
+              | .bin != $here) // false)
+      ) // false;
+  def stale_group: (.hooks? | arrays | any(.[]; stale)) // false;
+  # nested: a group keeps its other hooks, and goes when none is left.
+  def clean:
+    if $shape == "flat" then map(select(stale | not))
+    else map(if stale_group then .hooks |= map(select(stale | not)) | select(.hooks != []) else . end)
+    end;
+  def has_command($cmd):
+    if $shape == "flat" then any(.[]; .command? == $cmd)
+    else any(.[]; (.hooks? | .[]? | .command?) == $cmd)
+    end;
+  def entry($cmd; $matcher):
+    if $shape == "flat" then {command: $cmd}
+    else (if $matcher == "" then {} else {matcher: $matcher} end) + {hooks: [{type: "command", command: $cmd}]}
+    end;
+  def add($event; $matcher):
+    "\($notify) \($agent) \($event)" as $cmd
+    | .hooks[$event] |= (
+        if . == null then [] elif type == "array" then . else error("\($event) is not a list") end
+        | if has_command($cmd) then . else . + [entry($cmd; $matcher)] end
+      );
+
+  if length != 1 or (.[0] | type) != "object" then error("not a JSON object") else .[0] end
+  | if $shape != "flat" then .
+    elif has("version") and .version != 1 then error("unsupported version")
+    else .version = 1
+    end
+  | if (.hooks // {} | type) != "object" then error("hooks is not an object") else . end
+  | .hooks |= ((. // {}) | map_values(if type == "array" then clean else . end))
+  | reduce ($hooks | split("\n")[] | select(. != "") | split("\t")) as [$event, $matcher]
+      (.; add($event; $matcher // ""))
+'
+
+# install_agent AGENT
+# Update one agent's config file. Run in a subshell: the adapter's settings
+# stay inside it, and fail ends only this agent.
+install_agent() {
+  local agent=$1 dest dir notify current merged tmp
+  load_adapter "$agent" || fail "unknown agent: $agent"
+  dest=$HOME/$AGENT_CONFIG
+  dir=$(dirname "$dest")
+  mkdir -p "$dir" || fail "cannot create $dir"
+
+  # Claude Code runs the command through a shell; Cursor's is written unquoted.
+  notify=$bin_dir/notify
+  [ "$AGENT_CONFIG_SHAPE" = nested ] && notify=$(shell_quote "$notify")
+
+  current='{}'
+  if [ -s "$dest" ]; then
+    current=$(cat "$dest") || fail "cannot read $dest"
+  fi
+  merged=$(printf '%s' "$current" | jq -s --arg bin "$bin_dir" --arg notify "$notify" \
+    --arg agent "$agent" --arg shape "$AGENT_CONFIG_SHAPE" --arg hooks "$(agent_hooks)" --arg quote "'" "$merge") ||
+    fail "cannot update $dest; left unchanged"
+
+  tmp=$(mktemp "$dest.XXXXXX") || fail "cannot write to $dir"
+  if ! printf '%s\n' "$merged" > "$tmp" || ! mv "$tmp" "$dest"; then
+    rm -f "$tmp"
+    fail "cannot write $dest"
+  fi
+  printf '%s: %s\n' "$agent" "$dest"
+}
 
 command -v jq >/dev/null 2>&1 && jq -n . >/dev/null 2>&1 || fail 'jq not found'
-mkdir -p "$cursor_dir" || fail "cannot create $cursor_dir"
 
-current='{}'
-if [ -s "$dest" ]; then
-  current=$(cat "$dest") || fail "cannot read $dest"
+# No agent named: take each adapter whose config directory exists.
+if [ $# -eq 0 ]; then
+  for file in "$bin_dir"/agents/*.sh; do
+    agent=${file##*/}
+    agent=${agent%.sh}
+    (load_adapter "$agent" && [ -d "$(dirname "$HOME/$AGENT_CONFIG")" ]) && set -- "$@" "$agent"
+  done
+  [ $# -gt 0 ] || fail 'no agent config directory found; name an agent, for example: install claude'
 fi
 
-# Merge our hooks into the current file. For each event in the list, append
-# {"command": "<bin>/<script>"} unless that exact command is already there.
-# Other hooks and keys are kept. jq fails, leaving the file untouched, if the
-# version is not 1 or the file does not have the expected shape.
-merged=$(printf '%s' "$current" | jq --arg bin "$bin_dir" '
-  def add($event; $cmd):
-    .hooks[$event] |= ((. // []) | if any(.[]; .command? == $cmd) then . else . + [{command: $cmd}] end);
-  if has("version") and .version != 1 then error("unsupported version") else . end
-  | .version = 1
-  | reduce (
-      ["stop", "notify-on-stop"],
-      ["beforeShellExecution", "notify-on-approval"],
-      ["beforeMCPExecution", "notify-on-approval"]
-    ) as [$event, $script] (.; add($event; $bin + "/" + $script))
-') || fail "cannot update $dest; left unchanged"
+# Check every name before anything is written.
+for agent in "$@"; do
+  (load_adapter "$agent") || fail "unknown agent: $agent"
+done
 
-tmp=$(mktemp "$dest.XXXXXX") || fail "cannot write to $cursor_dir"
-if ! printf '%s\n' "$merged" > "$tmp" || ! mv "$tmp" "$dest"; then
-  rm -f "$tmp"
-  fail "cannot write $dest"
-fi
+status=0
+for agent in "$@"; do
+  (install_agent "$agent") || status=1
+done
+exit "$status"

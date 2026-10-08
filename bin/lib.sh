@@ -1,4 +1,4 @@
-# Shared by notify and the old notify-on-* scripts. Source it; do not run it.
+# Shared by notify and install. Source it; do not run it.
 LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
 # Talk to the tmux server the agent runs under.
