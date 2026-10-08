@@ -28,8 +28,9 @@ bin_dir=$(resolve_dir "$0")
 # as it is written in the command, and $hooks is the output of agent_hooks.
 # First remove the entries an earlier install left, under every event. Then,
 # for each hook, append an entry unless one with that exact command is there.
-# Other hooks and keys are kept. jq fails, leaving the file untouched, when the
-# file does not have the expected shape.
+# Other hooks and keys are kept. A file with nothing but whitespace in it counts
+# as {}. jq fails, leaving the file untouched, when the file does not have the
+# expected shape.
 merge='
   # True for an entry whose command an earlier install wrote: the old scripts,
   # or notify in another checkout of this tool. Single quotes are ignored.
@@ -63,7 +64,10 @@ merge='
         | if has_command($cmd) then . else . + [entry($cmd; $matcher)] end
       );
 
-  if length != 1 or (.[0] | type) != "object" then error("not a JSON object") else .[0] end
+  if length == 0 then {}
+  elif length != 1 or (.[0] | type) != "object" then error("not a JSON object")
+  else .[0]
+  end
   | if $shape != "flat" then .
     elif has("version") and .version != 1 then error("unsupported version")
     else .version = 1
@@ -78,7 +82,7 @@ merge='
 # Update one agent's config file. Run in a subshell: the adapter's settings
 # stay inside it, and fail ends only this agent.
 install_agent() {
-  local agent=$1 dest dir notify current merged tmp
+  local agent=$1 dest dir notify current mode= merged tmp
   load_adapter "$agent" || fail "unknown agent: $agent"
   dest=$HOME/$AGENT_CONFIG
   dir=$(dirname "$dest")
@@ -92,12 +96,17 @@ install_agent() {
   if [ -s "$dest" ]; then
     current=$(cat "$dest") || fail "cannot read $dest"
   fi
+  # The new file gets the permission bits of the one it replaces (of the file
+  # a symlink points at, not of the link). A file that is new keeps mktemp's.
+  if [ -e "$dest" ]; then
+    mode=$(stat -L -f %Lp "$dest") || fail "cannot read the mode of $dest"
+  fi
   merged=$(printf '%s' "$current" | jq -s --arg bin "$bin_dir" --arg notify "$notify" \
     --arg agent "$agent" --arg shape "$AGENT_CONFIG_SHAPE" --arg hooks "$(agent_hooks)" --arg quote "'" "$merge") ||
     fail "cannot update $dest; left unchanged"
 
   tmp=$(mktemp "$dest.XXXXXX") || fail "cannot write to $dir"
-  if ! printf '%s\n' "$merged" > "$tmp" || ! mv "$tmp" "$dest"; then
+  if ! printf '%s\n' "$merged" > "$tmp" || { [ -n "$mode" ] && ! chmod "$mode" "$tmp"; } || ! mv "$tmp" "$dest"; then
     rm -f "$tmp"
     fail "cannot write $dest"
   fi
@@ -121,8 +130,18 @@ for agent in "$@"; do
   (load_adapter "$agent") || fail "unknown agent: $agent"
 done
 
-status=0
+# An agent named twice is installed once. Names are lowercase letters only, so
+# they can be kept in one space-separated list.
+agents=
 for agent in "$@"; do
+  case " $agents " in
+    *" $agent "*) ;;
+    *) agents="$agents $agent" ;;
+  esac
+done
+
+status=0
+for agent in $agents; do
   (install_agent "$agent") || status=1
 done
 exit "$status"

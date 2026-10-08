@@ -1,6 +1,6 @@
 # tmux-agent-notify design
 
-Status: draft for review. Revised after an independent review and a second round of measurements.
+Status: implemented. Revised after an independent review, a second round of measurements, and a review of the implementation.
 
 Date: 2026-10-08
 
@@ -72,7 +72,8 @@ Why the transcript cannot say it either:
 
 What the pane shows:
 
-- **The last non-empty line of the pane contains `Esc to cancel` for as long as a prompt is up.** Seen for a Bash approval (`Esc to cancel · Tab to amend`), a subagent's approval (the same, with more text after it), and a question (`Enter to select · ↑/↓ to navigate · Esc to cancel`).
+- **The last line of the pane that is not blank contains `Esc to cancel` for as long as a prompt is up.** Seen for a Bash approval (`Esc to cancel · Tab to amend`), a subagent's approval (the same, with more text after it), and a question (`Enter to select · ↑/↓ to navigate · Esc to cancel`).
+- **A narrow pane wraps that line.** At 60 columns the subagent footer, 78 characters long, takes two lines, and the last one is `background agents`.
 - **That line is gone within 0.3 seconds of the answer** in every run: approve, deny, Esc, question answered, long command approved, subagent prompt approved.
 - It stayed in place through a 40-second wait while a background task finished.
 - The pane's text as a whole changes about twice a second while a prompt is up, so comparing whole-screen snapshots does not work.
@@ -145,22 +146,30 @@ It reads the pane with `tmux capture-pane -p` and passes the text to the adapter
 1. If another watcher has taken over this pane, exit (see **One watcher per pane**).
 2. Read the pane. If that fails, the pane or the tmux server is gone: exit without notifying.
 3. If the prompt is not on screen:
-   - when it has been seen before, or the adapter says it is on screen from the start, the wait is over: exit without notifying;
+   - when it has been seen before, or the adapter says it is on screen from the start: on the second poll in a row without it, the wait is over, so exit without notifying. One poll without it is not enough, because the pane may have been read in the middle of a redraw;
    - otherwise keep waiting for it to appear, and exit without notifying after `NOTIFY_APPROVAL_APPEAR_POLLS` polls (default 40).
-4. If the prompt is on screen and the terminal is not frontmost or the pane is not visible, notify and exit.
+4. If the prompt is on screen, take over the pane if this watcher has not done so yet (see **One watcher per pane**). Then, if the terminal is not frontmost or the pane is not visible, notify and exit.
 
 Pacing: wait `NOTIFY_APPROVAL_DELAY` seconds (default 0.4) before the first poll when the adapter must wait for the prompt to appear, and not at all otherwise. Then poll every `NOTIFY_APPROVAL_INTERVAL` seconds (default 0.5) for the first `NOTIFY_APPROVAL_POLLS` polls (default 240), then every `NOTIFY_APPROVAL_SLOW_INTERVAL` seconds (default 2), until `NOTIFY_APPROVAL_MAX_SECONDS` (default 3600) have passed since the start. At that point exit without notifying.
 
 This changes the meaning of `NOTIFY_APPROVAL_POLLS`: it was the whole budget and is now the length of the fast phase.
 
+Each setting is checked once, when the watcher starts. The delay and the two intervals must be decimal numbers that are not negative; zero is allowed. The two poll counts and the maximum must be whole numbers above zero. Any other value is replaced by the default.
+
 ### One watcher per pane
 
-A pane shows one prompt at a time, so one watcher per pane is enough. Two can otherwise overlap when a second prompt replaces the first faster than a poll can see the gap, and both would notify.
+A pane shows one prompt at a time, so one watcher per prompt is enough. Two can otherwise watch the same prompt, and both would notify: when the agent fires two hooks for it, or when a second prompt replaces the first faster than a poll can see the gap.
 
-- At start, the watcher writes its process id to `${TMPDIR:-/tmp}/tmux-agent-notify/pane-<pane id>`, replacing what was there.
-- On each poll, it exits when the file no longer holds its id.
+- The pane file is `${TMPDIR:-/tmp}/tmux-agent-notify/pane-<socket>-<pane id>`. The socket is the tmux socket path from `TMUX`, because every tmux server has a pane `%0`. In both parts, characters other than letters and digits are replaced (`%` is kept in the pane id), and both are cut to a fixed length, so the name stays short and inside the directory.
+- A watcher takes over the pane on the first poll where it sees its own prompt, not at start. It writes its process id to the file, replacing what was there.
+- Until then it holds no claim. It stops no other watcher, and no other watcher stops it. This matters for Cursor: a hook for command B can arrive while the card for command A is up. B's watcher never sees its own card, so A's watcher must be left alone.
+- On each poll, a watcher that has taken over exits when the file holds another id. That other watcher has seen the same prompt and will notify for it.
 - It removes the file when it exits, if the file still holds its id.
-- If the file cannot be written or read, the watcher carries on without it. A possible duplicate is better than no notification.
+- If the file cannot be written or read, or is missing, the watcher carries on without it. A possible duplicate is better than no notification.
+
+A watcher that holds no claim still ends in the usual ways: the appear polls run out, the prompt is gone for two polls, the pane cannot be read, or the time budget is reached. So none is left running.
+
+Two watchers can still both notify when the second sees the prompt and notifies between two polls of the first, because it removes the file as it exits. That needs you to look away in that same moment, and the two notifications share a group.
 
 ## Claude Code adapter
 
@@ -176,7 +185,7 @@ Session is `session_id`. Folder comes from `cwd`.
 
 A `Notification` whose `notification_type` is not `permission_prompt` gives an empty kind, in case the matcher is edited by hand.
 
-**Prompt check:** the last non-empty line of the pane contains `Esc to cancel`. Only the last line is checked, so the same words elsewhere in the conversation do not count. The prompt is on screen when the hook runs, because `Notification` arrives six seconds after it appears.
+**Prompt check:** one of the last three lines of the pane that are not blank contains `Esc to cancel`. A line of only spaces or tabs is blank. Three lines are checked, not one, because a narrow pane wraps the footer. Lines further up are not checked, so the same words elsewhere in the conversation do not count. The prompt is on screen when the hook runs, because `Notification` arrives six seconds after it appears.
 
 ## Cursor adapter
 
@@ -193,9 +202,10 @@ Behavior is unchanged from the earlier spec, apart from the longer watcher budge
 
 - No arguments: install for each known agent whose config directory exists (`~/.cursor`, `~/.claude`). If none exists, print an `install:` error and exit non-zero.
 - With arguments: install for those agents, creating the config directory if needed. An unknown agent name is an error, and nothing is written for any agent.
-- Print one line per agent installed.
+- An agent named more than once is installed once, in the order first named.
+- Print one line per agent installed: `<agent>: <file>`.
 
-Each agent's file is merged with `jq`, written to a temp file beside it, and moved into place, as today. A failure for one agent leaves that agent's file unchanged and makes the exit status non-zero; other agents are still attempted.
+Each agent's file is merged with `jq`, written to a temp file beside it, and moved into place, as today. The new file gets the permission bits of the file it replaces; a file that did not exist is created with mode 600, as `mktemp` makes it. A failure for one agent leaves that agent's file unchanged and makes the exit status non-zero; other agents are still attempted.
 
 The hook command is `<bin>/notify <agent> <hook-event>`, where `<bin>` is the symlink-resolved directory of `bin/install`. Claude Code runs the command through a shell, so `<bin>/notify` is single-quoted in Claude Code's file. Cursor's is written unquoted, as today.
 
@@ -209,11 +219,11 @@ A group left with no hooks is removed too. Entries that match none of these are 
 
 **Rename order.** Rename the directory first, then run `bin/install`. Until it is run, the hooks in `~/.cursor/hooks.json` point at the old path and do nothing.
 
-**Cursor.** Same merge rules as the earlier spec, with the new commands.
+**Cursor.** Same merge rules as the earlier spec, with the new commands. A missing or empty file, or one with only whitespace in it, is treated as `{}`.
 
 **Claude Code.** In `~/.claude/settings.json`:
 
-- A missing or empty file is treated as `{}`. All other keys are kept.
+- A missing or empty file, or one with only whitespace in it, is treated as `{}`. All other keys are kept.
 - For each hook, append `{"matcher": <matcher>, "hooks": [{"type": "command", "command": <command>}]}` to `hooks.<Event>`. Leave `matcher` out when the hook has none.
 - Skip the append when any group under that event already contains a hook with the same `command`.
 - Invalid JSON, a non-object root, a non-object `hooks`, or a non-array event leaves the file unchanged and reports an error.
@@ -236,7 +246,7 @@ Same approach: no real agent is started, and fakes for `osascript`, `terminal-no
 Harness changes needed:
 
 - The fake `tmux` and fake `osascript` must be able to read their answers from a file, so a test can change the pane text or the frontmost app while a watcher runs. Today they read fixed environment variables.
-- Tests set `TMPDIR` to a temp directory, and set `NOTIFY_APPROVAL_MAX_SECONDS` low so no watcher outlives its test.
+- Tests set `TMPDIR` to a temp directory. The watcher tests give the watcher a budget far longer than any test waits, so a watcher that exits did so for the reason under test. A test that fails stops the watchers it started.
 - Existing installer tests that run with no arguments and expect `~/.cursor` to be created pass `cursor` instead.
 
 Cases:
@@ -248,14 +258,21 @@ Cases:
   - Away when the prompt is up: notifies on the first poll.
   - Looking, then away with the prompt still up: notifies after the focus change.
   - Looking, then the prompt leaves the pane: exits without notifying, including when the user looks away afterwards.
-  - Claude Code: the prompt is not on screen at the first poll: exits without notifying.
-  - Claude Code: `Esc to cancel` on a line that is not the last non-empty line does not count.
+  - One poll without the prompt, then the prompt again: keeps watching.
+  - Claude Code: the prompt is not on screen at the first two polls: exits without notifying.
+  - Claude Code: `Esc to cancel` four or more non-blank lines from the bottom does not count; a wrapped footer does.
+  - Cursor: the prompt appears a few polls after the hook: notifies.
   - Cursor: the prompt never appears: exits after the appear polls.
+  - Cursor: the card is on screen but above the last 15 lines: not a prompt.
   - The pane cannot be read: exits without notifying.
-  - A second watcher for the same pane makes the first exit, and one notification at most is posted.
+  - A second watcher that sees the same prompt makes the first exit, and one notification is posted.
+  - Cursor: a second watcher for another command, whose card never shows, leaves the first running.
+  - The same pane id on two tmux sockets: both watchers notify.
+  - The fast phase uses the fast interval and the slow phase the slow one.
+  - A setting that is not a number: the default is used.
   - Time budget reached while looking: no notification.
   - The hook returns before the watcher finishes.
-- **Installer:** the existing Cursor cases; each removal rule, and an unrelated entry that survives; Claude Code create, merge, keep other keys and hooks, idempotent second run, matcher present only where specified, quoted path, invalid shapes left unchanged; no-argument agent detection; unknown agent name.
+- **Installer:** the existing Cursor cases; each removal rule, and an unrelated entry that survives; Claude Code create, merge, keep other keys and hooks, idempotent second run, matcher present only where specified, quoted path, invalid shapes left unchanged; no-argument agent detection; unknown agent name; a whitespace-only file; an agent named twice; permission bits kept.
 
 Manual check for Claude Code, mirroring the Cursor one: trigger a permission prompt while away; trigger one while looking and then switch app; trigger one while looking, then approve, deny, and press Esc in turn, switching app after each and confirming silence; approve a long command and switch app while it runs, confirming silence; finish a turn while away.
 
@@ -270,7 +287,10 @@ Rewrite for the new name, both agents, the `bin/install [agent...]` form, the re
 - **Approval and question look the same (Claude Code).** Both get the title `Claude is waiting for you`.
 - **"Finished" with background work still running (Claude Code).** A turn that hands work to a background subagent or shell ends at once, so `Claude finished` is posted while that work continues. A later prompt from it notifies as usual.
 - **A locked screen counts as looking.** The terminal stays frontmost when the screen locks, so walking away without switching app does not notify.
-- **Not measured:** prompts for a sandboxed command's network access, and Claude Code prompts other than tool approvals and questions. They notify only if their last line also contains `Esc to cancel`.
+- **A terminal in the background counts as looking.** The focus check asks which app is frontmost and whether the pane is the active one in an attached session. A session attached in a background tab or window of the frontmost terminal passes both.
+- **A slow `osascript` delays everything behind it.** The focus check waits for `osascript`. If it hangs, for example on the first-run Automation dialog, the watcher's poll and the finished notification wait with it.
+- **A config file that is a symlink is replaced by a regular file.** The installer moves a new file into place and does not follow the link. The file the link pointed at is left as it was.
+- **Not measured:** prompts for a sandboxed command's network access, and Claude Code prompts other than tool approvals and questions. They notify only if one of their last three lines also contains `Esc to cancel`. A pane so narrow that the footer wraps inside those words, or onto more than three lines, is not recognized.
 - **Cursor paths with spaces.** Cursor's command is written unquoted, so a checkout path containing spaces is not supported for Cursor.
 - Cursor's limitations from the earlier spec still apply.
 

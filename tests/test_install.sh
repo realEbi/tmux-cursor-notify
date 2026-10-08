@@ -527,6 +527,77 @@ test_install_claude_empty_file() {
   assert_json "$(settings_path)" "$expected"
 }
 
+# A file of only spaces and newlines counts as empty, for both shapes.
+test_install_blank_file() {
+  local expected
+  fresh_home
+  mkdir -p "$HOME/.claude" "$HOME/.cursor"
+  printf ' \n\t\n\n' > "$(settings_path)"
+  printf '\n  \n' > "$(hooks_path)"
+  run_install claude cursor
+  assert_exit 0
+  expected=$(claude_created)
+  assert_json "$(settings_path)" "$expected"
+  assert_created
+}
+
+# file_mode FILE
+# The permission bits in octal, such as 644.
+file_mode() {
+  stat -f %Lp "$1"
+}
+
+# The file keeps the permission bits it had. A new file is private.
+test_install_keeps_mode() {
+  local mode
+  for mode in 644 600 640; do
+    fresh_home
+    mkdir -p "$HOME/.claude" "$HOME/.cursor"
+    printf '%s\n' '{"env":{"A":"1"}}' > "$(settings_path)"
+    printf '%s\n' '{}' > "$(hooks_path)"
+    chmod "$mode" "$(settings_path)" "$(hooks_path)"
+    run_install claude cursor
+    assert_exit 0
+    assert_created
+    [ "$(file_mode "$(settings_path)")" = "$mode" ] ||
+      { echo "settings.json: mode $mode became $(file_mode "$(settings_path)")" >&2; exit 1; }
+    [ "$(file_mode "$(hooks_path)")" = "$mode" ] ||
+      { echo "hooks.json: mode $mode became $(file_mode "$(hooks_path)")" >&2; exit 1; }
+  done
+
+  fresh_home
+  run_install claude
+  assert_exit 0
+  [ "$(file_mode "$(settings_path)")" = 600 ] ||
+    { echo "new settings.json has mode $(file_mode "$(settings_path)")" >&2; exit 1; }
+
+  # Behind a symlink, the mode is that of the file, not of the link.
+  fresh_home
+  mkdir -p "$HOME/.claude"
+  printf '%s\n' '{}' > "$HOME/real.json"
+  chmod 640 "$HOME/real.json"
+  ln -s "$HOME/real.json" "$(settings_path)"
+  run_install claude
+  assert_exit 0
+  [ "$(file_mode "$(settings_path)")" = 640 ] ||
+    { echo "symlinked settings.json got mode $(file_mode "$(settings_path)")" >&2; exit 1; }
+}
+
+# An agent named more than once is installed once, in first-named order.
+test_install_repeated_agent() {
+  fresh_home
+  run_install claude claude cursor claude
+  assert_exit 0
+  assert_stdout_trimmed "claude: $(settings_path)
+cursor: $(hooks_path)"
+  [ "$(grep -c -F -x "$(settings_path)" "$FAKE_LOG/mv")" = 1 ] ||
+    { echo "settings.json was written more than once" >&2; cat "$FAKE_LOG/mv" >&2; exit 1; }
+  local expected
+  expected=$(claude_created)
+  assert_json "$(settings_path)" "$expected"
+  assert_created
+}
+
 test_install_claude_merges() {
   fresh_home
   mkdir -p "$HOME/.claude"
@@ -828,6 +899,9 @@ run_tests \
   test_install_keeps_current_entry \
   test_install_claude_creates \
   test_install_claude_empty_file \
+  test_install_blank_file \
+  test_install_keeps_mode \
+  test_install_repeated_agent \
   test_install_claude_merges \
   test_install_claude_idempotent \
   test_install_claude_finds_command_in_any_group \
