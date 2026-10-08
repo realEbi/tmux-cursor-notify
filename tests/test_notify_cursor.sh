@@ -272,6 +272,98 @@ test_watch_second_replaces_first() {
     { echo "pane file left behind: $(ls -A "$TMPDIR/tmux-agent-notify")" >&2; exit 1; }
 }
 
+# A hook for another command arrives while the card for the first is up. Its
+# watcher never sees its own card, so it must not stop the first one.
+test_watch_other_command_keeps_first() {
+  watch_setup %w13
+  export NOTIFY_APPROVAL_APPEAR_POLLS=3
+  watch_hook
+  wait_for_polls 2
+  watch_hook '{"command":"cargo build --release","conversation_id":"c1","workspace_roots":["/tmp/app"]}'
+  # The second watcher gives up after its appear polls; the first stays.
+  wait_for_watchers %w13 1
+  assert_not_called terminal-notifier
+  look_away
+  wait_for_notifier
+  assert_notifier_arg -message 'npm install deps'
+  assert_no_watchers %w13
+  assert_notifier_calls 1
+}
+
+# Every tmux server has a pane %0. Watchers for the same pane id on two
+# servers do not stop each other.
+test_watch_same_pane_other_server() {
+  local polls
+  watch_setup %w14
+  export TMUX=/tmp/sock-a,1,0
+  watch_hook
+  wait_for_polls 2
+  export TMUX=/tmp/sock-b,1,0
+  watch_hook
+  polls=$(tmux_calls display-message)
+  wait_for_polls $((polls + 6))
+  wait_for_watchers %w14 2
+  [ "$(ls -A "$TMPDIR/tmux-agent-notify" | sort | tr '\n' ' ')" = 'pane-_tmp_sock_a-%w14 pane-_tmp_sock_b-%w14 ' ] ||
+    { echo "unexpected pane files: $(ls -A "$TMPDIR/tmux-agent-notify")" >&2; exit 1; }
+  look_away
+  wait_for_notifier_calls 2
+  assert_log_contains terminal-notifier "'/tmp/sock-a' '%w14'"
+  assert_log_contains terminal-notifier "'/tmp/sock-b' '%w14'"
+  assert_no_watchers %w14
+  assert_notifier_calls 2
+  [ -z "$(ls -A "$TMPDIR/tmux-agent-notify")" ] ||
+    { echo "pane file left behind: $(ls -A "$TMPDIR/tmux-agent-notify")" >&2; exit 1; }
+}
+
+# One capture without the card, as in the middle of a redraw, does not end the
+# watch. Two in a row do; test_watch_answered_then_away covers that.
+test_watch_one_miss_keeps_watching() {
+  local polls
+  watch_setup %w15
+  watch_hook
+  wait_for_polls 2
+  fake_set tmux-capture-once 'agent working'
+  wait_for_capture_once
+  polls=$(tmux_calls display-message)
+  wait_for_polls $((polls + 2))
+  look_away
+  wait_for_notifier
+  assert_no_watchers %w15
+  assert_notifier_calls 1
+}
+
+# An interval that is not a number falls back to the default of half a second,
+# instead of polling without a pause.
+test_watch_bad_interval() {
+  watch_setup %w16
+  export NOTIFY_APPROVAL_INTERVAL=abc
+  export NOTIFY_APPROVAL_SLOW_INTERVAL=fast
+  watch_hook
+  wait_for_polls 1
+  wait_quiet 1.5
+  [ "$(tmux_calls display-message)" -le 6 ] ||
+    { echo "polled $(tmux_calls display-message) times in 1.5 seconds" >&2; exit 1; }
+  look_away
+  wait_for_notifier
+  assert_no_watchers %w16
+  assert_notifier_calls 1
+}
+
+# A budget that is not a whole number falls back to the default.
+test_watch_bad_max_seconds() {
+  local max
+  for max in 1.5 abc 0; do
+    watch_setup %w17
+    export NOTIFY_APPROVAL_MAX_SECONDS=$max
+    watch_hook
+    wait_for_polls 2
+    look_away
+    wait_for_notifier
+    assert_no_watchers %w17
+    assert_notifier_calls 1
+  done
+}
+
 # The card shows up a few polls after the hook.
 test_watch_card_appears_later() {
   watch_setup %w9
@@ -384,7 +476,7 @@ test_watch_odd_pane_id() {
   watch_setup '%s/../%d'
   watch_hook
   wait_for_polls 2
-  [ "$(ls -A "$TMPDIR/tmux-agent-notify")" = 'pane-%s____%d' ] ||
+  [ "$(ls -A "$TMPDIR/tmux-agent-notify")" = 'pane--%s____%d' ] ||
     { echo "unexpected pane file: $(ls -A "$TMPDIR/tmux-agent-notify")" >&2; exit 1; }
   look_away
   wait_for_notifier
@@ -392,6 +484,24 @@ test_watch_odd_pane_id() {
   assert_no_watchers '%s/../%d'
 }
 
+# The socket path is data too, of any length: the file name stays short and
+# inside the directory.
+test_watch_odd_socket() {
+  local long name
+  long=$(printf 'a%.0s' $(seq 1 300))
+  watch_setup %w18
+  export TMUX="/tmp/../é $long/../sock,1,0"
+  watch_hook
+  wait_for_polls 2
+  name=$(ls -A "$TMPDIR/tmux-agent-notify")
+  [ "$name" = "pane-${long:0:92}____sock-%w18" ] ||
+    { echo "unexpected pane file: $name" >&2; exit 1; }
+  [ "$(find "$TMPDIR" -type f | grep -c .)" = 1 ] ||
+    { echo "files outside the directory: $(find "$TMPDIR" -type f)" >&2; exit 1; }
+  look_away
+  wait_for_notifier
+  assert_no_watchers %w18
+}
 
 test_approval_wrapped_snippet_prefix() {
   harness_use_fakes
@@ -453,6 +563,11 @@ run_tests \
   test_watch_answered_then_away \
   test_watch_pane_gone \
   test_watch_second_replaces_first \
+  test_watch_other_command_keeps_first \
+  test_watch_same_pane_other_server \
+  test_watch_one_miss_keeps_watching \
+  test_watch_bad_interval \
+  test_watch_bad_max_seconds \
   test_watch_card_appears_later \
   test_watch_card_never_appears \
   test_watch_card_above_window \
@@ -460,4 +575,5 @@ run_tests \
   test_watch_budget_reached \
   test_watch_slow_phase_still_notifies \
   test_watch_hook_returns_while_watching \
-  test_watch_odd_pane_id
+  test_watch_odd_pane_id \
+  test_watch_odd_socket

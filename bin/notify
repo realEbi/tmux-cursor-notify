@@ -5,24 +5,27 @@
 . "$(cd "$(dirname "$0")" && pwd -P)/lib.sh"
 
 # Background watcher: wait for the agent's prompt, then notify once you look away.
-# Stops quietly when the prompt goes away, the pane cannot be read, a newer
+# Stops quietly when the prompt goes away, the pane cannot be read, another
 # watcher takes over the pane, or time runs out.
 watch() {
   local agent=${1-} pane=${2-} title=${3-} body=${4-} group=${5-} detail=${6-}
-  local interval=${NOTIFY_APPROVAL_INTERVAL:-0.5}
-  local slow=${NOTIFY_APPROVAL_SLOW_INTERVAL:-2}
-  local polls=${NOTIFY_APPROVAL_POLLS:-240}
-  local appear=${NOTIFY_APPROVAL_APPEAR_POLLS:-40}
-  local max=${NOTIFY_APPROVAL_MAX_SECONDS:-3600}
-  local seen=0 i=0 screen
+  local delay interval slow polls appear max
+  local seen=0 claimed=0 missed=0 i=0 screen
+
+  # A setting that is not a number falls back to its default.
+  delay=$(number_or "${NOTIFY_APPROVAL_DELAY-}" 0.4)
+  interval=$(number_or "${NOTIFY_APPROVAL_INTERVAL-}" 0.5)
+  slow=$(number_or "${NOTIFY_APPROVAL_SLOW_INTERVAL-}" 2)
+  polls=$(count_or "${NOTIFY_APPROVAL_POLLS-}" 240)
+  appear=$(count_or "${NOTIFY_APPROVAL_APPEAR_POLLS-}" 40)
+  max=$(count_or "${NOTIFY_APPROVAL_MAX_SECONDS-}" 3600)
 
   load_adapter "$agent" || return 0
   SECONDS=0
   trap pane_release EXIT
-  pane_claim "$pane"
 
   if [ "${AGENT_PROMPT_APPEARS_LATER-}" = 1 ]; then
-    sleep "${NOTIFY_APPROVAL_DELAY:-0.4}"
+    sleep "$delay"
   else
     # The prompt is up already, so a pane without it means the wait is over.
     seen=1
@@ -32,12 +35,24 @@ watch() {
     # A pane that cannot be read is gone, and so is its prompt.
     screen=$(tmux_cmd capture-pane -p -t "$pane" 2>/dev/null) || return 0
     if agent_prompt_on_screen "$screen" "$detail"; then
-      seen=1
+      seen=1 missed=0
+      # Take the pane only now, with this watcher's own prompt in sight. A
+      # watcher that never sees its prompt must not stop one that still does.
+      if [ "$claimed" = 0 ]; then
+        claimed=1
+        pane_claim "$pane"
+      fi
       if ! terminal_is_front || ! pane_is_visible "$pane"; then
         notify "$title" "$body" "$group" "$pane"
         return 0
       fi
-    elif [ "$seen" = 1 ] || [ $((i + 1)) -ge "$appear" ]; then
+    elif [ "$seen" = 1 ]; then
+      # One miss may be a pane caught in the middle of a redraw. Two in a row
+      # mean the prompt is gone and the wait is over.
+      missed=$((missed + 1))
+      [ "$missed" -ge 2 ] && return 0
+    elif [ $((i + 1)) -ge "$appear" ]; then
+      # The prompt never appeared.
       return 0
     fi
     # Poll fast at first, then slowly for as long as the prompt stays up.

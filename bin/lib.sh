@@ -59,16 +59,50 @@ notify() {
 end run' -- "$title" "$body" Glass || true
 }
 
-# One watcher per pane. The newest watcher writes its process id to the pane
-# file, and an older one stops when it reads another id there. PANE_FILE stays
-# empty when the file cannot be written; the watcher then runs without the check.
+# number_or VALUE DEFAULT
+# Print VALUE when it is a decimal number that is not negative, like 2, 0.5 or
+# .5. Print DEFAULT for anything else.
+number_or() {
+  local number='^([0-9]+(\.[0-9]*)?|\.[0-9]+)$'
+  if [[ $1 =~ $number ]]; then
+    printf '%s\n' "$1"
+  else
+    printf '%s\n' "$2"
+  fi
+}
+
+# count_or VALUE DEFAULT
+# Print VALUE when it is a whole number above zero, of nine digits at most so
+# that shell arithmetic can hold it. Print DEFAULT for anything else.
+count_or() {
+  local count='^[0-9]{1,9}$'
+  if [[ $1 =~ $count ]] && [ "$((10#$1))" -gt 0 ]; then
+    printf '%s\n' "$((10#$1))"
+  else
+    printf '%s\n' "$2"
+  fi
+}
+
+# One watcher per pane. A watcher that sees its prompt writes its process id to
+# the pane file, and an earlier one stops when it reads another id there.
+# PANE_FILE is empty until then, and stays empty when the file cannot be
+# written; the watcher then runs without the check.
 PANE_FILE=
 
-# Take over the pane. Pane ids look like %12; any other character is replaced,
-# so the id cannot point outside the directory.
+# Take over the pane. The file is named after the tmux socket and the pane id,
+# because every tmux server has a pane %0. Characters other than letters and
+# digits (and % in the pane id, which looks like %12) are replaced, and both
+# parts are cut short, so the name cannot point outside the directory or grow
+# too long.
 pane_claim() {
-  local dir="${TMPDIR:-/tmp}/tmux-agent-notify" file
-  file="$dir/pane-${1//[!%A-Za-z0-9]/_}"
+  local dir="${TMPDIR:-/tmp}/tmux-agent-notify" socket= pane file
+  local safe=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
+  [ -n "${TMUX-}" ] && socket=${TMUX%%,*}
+  socket=${socket//[!$safe]/_}
+  pane=${1//[!%$safe]/_}
+  # The end of a socket path is the part that differs between servers.
+  [ "${#socket}" -gt 100 ] && socket=${socket:$((${#socket} - 100))}
+  file="$dir/pane-$socket-${pane:0:40}"
   { mkdir -p "$dir" && printf '%s\n' "$$" >"$file"; } 2>/dev/null || return 0
   PANE_FILE=$file
 }

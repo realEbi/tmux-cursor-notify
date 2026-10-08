@@ -43,14 +43,17 @@ agent_parse() {
 }
 
 # agent_prompt_on_screen SCREEN DETAIL
-# True when the last line of the pane text that is not blank contains
-# "Esc to cancel", the footer of every prompt in Claude Code 2.1.294. The same
-# words further up, in the conversation, do not count.
+# True when one of the last three lines of the pane text that are not blank
+# contains "Esc to cancel", the footer of every prompt in Claude Code 2.1.294.
+# Three lines, because a narrow pane wraps the footer. The same words further
+# up, in the conversation, do not count.
 agent_prompt_on_screen() {
-  local line last=
+  local line third= second= last=
   while IFS= read -r line; do
     # A line of only spaces or tabs is blank.
-    [[ $line == *[![:space:]]* ]] && last=$line
+    if [[ $line == *[![:space:]]* ]]; then
+      third=$second second=$last last=$line
+    fi
   done <<<"$1"
-  [[ $last == *'Esc to cancel'* ]]
+  [[ $third$'\n'$second$'\n'$last == *'Esc to cancel'* ]]
 }

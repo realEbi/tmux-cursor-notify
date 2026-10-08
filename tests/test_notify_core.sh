@@ -447,6 +447,24 @@ test_core_no_args() {
   expect_silent
 }
 
+# number_or and count_or keep a valid setting and replace any other value.
+test_core_setting_values() {
+  harness_use_fakes
+  local got want
+  got=$(
+    . "$ROOT/bin/lib.sh"
+    for value in 0.5 .5 5. 5 0 007 abc 1e3 -1 '' '1 2' 1.2.3 $'1\n2' '$(touch ran)'; do
+      printf '%s ' "$(number_or "$value" D)"
+    done
+    printf '\n'
+    for value in 5 010 240 0 000 1.5 abc -3 '' '4 5' 12345678901234567890 '$(touch ran)'; do
+      printf '%s ' "$(count_or "$value" D)"
+    done
+  )
+  want=$'0.5 .5 5. 5 0 007 D D D D D D D D \n5 10 240 D D D D D D D D D '
+  [ "$got" = "$want" ] || { echo "setting values: got [$got]" >&2; exit 1; }
+}
+
 run_tests \
   test_notify_folder_is_not_run \
   test_notify_completed \
@@ -496,4 +514,5 @@ run_tests \
   test_core_unknown_agent \
   test_core_bad_agent_name \
   test_core_unknown_event \
-  test_core_no_args
+  test_core_no_args \
+  test_core_setting_values

@@ -67,16 +67,17 @@ expect_silent() {
 }
 
 # expect_not_a_prompt PANE
-# The watcher reads the pane once, finds no prompt and stops, although you are
-# away. A prompt that shows up afterwards is not its business any more.
+# The watcher reads the pane twice, finds no prompt either time and stops,
+# although you are away. A prompt that shows up afterwards is not its business
+# any more.
 expect_not_a_prompt() {
-  wait_for_captures 1
+  wait_for_captures 2
   assert_no_watchers "$1"
   fake_set tmux-capture "$pane_approval"
   wait_quiet 0.3
   assert_not_called terminal-notifier
-  [ "$(tmux_calls capture-pane)" = 1 ] ||
-    { echo "expected one capture-pane, saw $(tmux_calls capture-pane)" >&2; exit 1; }
+  [ "$(tmux_calls capture-pane)" = 2 ] ||
+    { echo "expected two capture-pane calls, saw $(tmux_calls capture-pane)" >&2; exit 1; }
 }
 
 test_claude_adapter_values() {
@@ -203,13 +204,73 @@ test_claude_prompt_already_gone() {
   expect_not_a_prompt %c6
 }
 
-# The words are in the conversation, above an ordinary last line.
-test_claude_marker_not_last_line() {
+# The words are in the conversation, four lines that are not blank from the
+# bottom. Only the last three are looked at.
+test_claude_marker_above_footer() {
   watch_setup %c7
-  fake_set tmux-capture $'⏺ Press Esc to cancel · Tab to amend\n Esc to cancel · Tab to amend\n\n❯ \n  ? for shortcuts'
+  fake_set tmux-capture $'⏺ Press Esc to cancel · Tab to amend\n Esc to cancel · Tab to amend\n\n──────\n❯ \n\n──────\n  ? for shortcuts\n'
   look_away
   watch_hook
   expect_not_a_prompt %c7
+}
+
+# The third line from the bottom that is not blank still counts.
+test_claude_marker_third_from_bottom() {
+  watch_setup %c15
+  fake_set tmux-capture $' Do you want to proceed?\n\n Esc to cancel · Tab to amend · ctrl+x\n\n ctrl+k twice to stop\n background agents\n\n'
+  look_away
+  watch_hook
+  wait_for_notifier
+  assert_no_watchers %c15
+  assert_notifier_calls 1
+}
+
+# The subagent footer in a pane 60 columns wide: tmux wraps it, and the last
+# line is "background agents".
+test_claude_wrapped_footer() {
+  watch_setup %c16
+  fake_set tmux-capture $' Do you want to proceed?\n ❯ 1. Yes\n   4. No\n\n Esc to cancel · Tab to amend · ctrl+x ctrl+k twice to stop\nbackground agents'
+  look_away
+  watch_hook
+  wait_for_notifier
+  assert_notifier_arg -title 'Claude is waiting for you'
+  assert_no_watchers %c16
+  assert_notifier_calls 1
+}
+
+# The first capture misses the prompt, as in the middle of a redraw. One miss
+# does not end the watch.
+test_claude_one_miss_keeps_watching() {
+  watch_setup %c17
+  fake_set tmux-capture-once "$pane_working"
+  look_away
+  watch_hook
+  wait_for_notifier
+  assert_no_watchers %c17
+  assert_notifier_calls 1
+  [ "$(tmux_calls capture-pane)" = 2 ] ||
+    { echo "expected two capture-pane calls, saw $(tmux_calls capture-pane)" >&2; exit 1; }
+}
+
+# Two Notification hooks for the prompt that is on screen: the first watcher
+# stops while you are still looking, and the one that is left notifies once.
+test_claude_second_hook_same_prompt() {
+  local polls
+  watch_setup %c18
+  watch_hook
+  wait_for_polls 2
+  watch_hook
+  wait_for_watchers %c18 1
+  polls=$(tmux_calls display-message)
+  wait_for_polls $((polls + 2))
+  assert_not_called terminal-notifier
+  look_away
+  wait_for_notifier
+  wait_quiet 0.5
+  assert_notifier_calls 1
+  assert_no_watchers %c18
+  [ -z "$(ls -A "$TMPDIR/tmux-agent-notify")" ] ||
+    { echo "pane file left behind: $(ls -A "$TMPDIR/tmux-agent-notify")" >&2; exit 1; }
 }
 
 # A working pane says "esc to interrupt", in lower case.
@@ -382,7 +443,11 @@ run_tests \
   test_claude_look_then_away \
   test_claude_answered_then_away \
   test_claude_prompt_already_gone \
-  test_claude_marker_not_last_line \
+  test_claude_marker_above_footer \
+  test_claude_marker_third_from_bottom \
+  test_claude_wrapped_footer \
+  test_claude_one_miss_keeps_watching \
+  test_claude_second_hook_same_prompt \
   test_claude_working_footer \
   test_claude_trailing_blank_lines \
   test_claude_other_notification_type \

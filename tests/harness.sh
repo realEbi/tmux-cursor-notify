@@ -35,8 +35,10 @@ harness_hide() {
 # fake_set NAME VALUE
 # Change what a fake answers from its next call on, even for a process that is
 # already running. Names: tmux-capture, tmux-capture-exit, tmux-display,
-# osa-bundle, osa-name. Written through a temp file and renamed, so a reader
-# never sees a half-written value. /bin/mv, not the fake mv, to keep its log clean.
+# osa-bundle, osa-name, and tmux-capture-once, which is the pane text for the
+# next capture-pane call only. Written through a temp file and renamed, so a
+# reader never sees a half-written value. /bin/mv, not the fake mv, to keep its
+# log clean.
 fake_set() {
   local name="$1" value="$2"
   local tmp="$FAKE_STATE/.$name.$$.tmp"
@@ -92,6 +94,31 @@ wait_for_notifier() {
 wait_for_polls() {
   wait_until 5 tmux_called display-message "$1" || {
     echo "timeout waiting for $1 polls, saw $(tmux_calls display-message)" >&2
+    exit 1
+  }
+}
+
+# Wait up to 5 seconds until a capture-pane call has used up tmux-capture-once.
+wait_for_capture_once() {
+  wait_until 5 test ! -e "$FAKE_STATE/tmux-capture-once" || {
+    echo "timeout waiting for tmux-capture-once to be read" >&2
+    exit 1
+  }
+}
+
+notifier_called() {
+  local n=0
+  if [ -f "$FAKE_LOG/terminal-notifier" ]; then
+    n=$(grep -c -x -e '-title' "$FAKE_LOG/terminal-notifier")
+  fi
+  [ "$n" -ge "$1" ]
+}
+
+# wait_for_notifier_calls N
+# Wait up to 5 seconds until terminal-notifier has been called N times.
+wait_for_notifier_calls() {
+  wait_until 5 notifier_called "$1" || {
+    echo "timeout waiting for $1 terminal-notifier calls" >&2
     exit 1
   }
 }

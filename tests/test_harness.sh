@@ -43,6 +43,19 @@ test_harness_capture_changes() {
   assert_stdout_trimmed 'changed'
 }
 
+test_harness_capture_once() {
+  harness_use_fakes
+  fake_set tmux-capture 'steady'
+  fake_set tmux-capture-once 'just once'
+  run_capture tmux capture-pane -p -t %1
+  assert_stdout_trimmed 'just once'
+  wait_for_capture_once
+  run_capture tmux capture-pane -p -t %1
+  assert_stdout_trimmed 'steady'
+  [ "$(ls -A "$FAKE_STATE")" = tmux-capture ] ||
+    { echo "unexpected files: $(ls -A "$FAKE_STATE")" >&2; exit 1; }
+}
+
 test_harness_capture_exit() {
   harness_use_fakes
   export FAKE_TMUX_CAPTURE_EXIT=3
@@ -120,6 +133,7 @@ test_harness_notifier_calls() {
   assert_notifier_calls 1
   terminal-notifier -title Two -message 'other' -group g
   assert_notifier_calls 2
+  wait_for_notifier_calls 2
   if (assert_notifier_calls 1) 2>/dev/null; then
     echo "assert_notifier_calls accepted a wrong count" >&2
     exit 1
@@ -226,6 +240,7 @@ run_tests \
   test_harness_fake_set_skips_mv_log \
   test_harness_capture_env_fallback \
   test_harness_capture_changes \
+  test_harness_capture_once \
   test_harness_capture_exit \
   test_harness_display_changes \
   test_harness_osa_bundle_changes \

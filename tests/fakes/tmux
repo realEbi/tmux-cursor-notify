@@ -3,7 +3,11 @@ mkdir -p "$FAKE_LOG"
 printf '%s\n' "$@" >> "$FAKE_LOG/tmux"
 line=$(printf '%s\n' "$*")
 if printf '%s' "$line" | grep -q 'capture-pane'; then
-  if [ -n "${FAKE_STATE-}" ] && [ -f "$FAKE_STATE/tmux-capture" ]; then
+  # tmux-capture-once answers a single call. The rename lets only one caller have it.
+  if [ -n "${FAKE_STATE-}" ] && /bin/mv "$FAKE_STATE/tmux-capture-once" "$FAKE_STATE/.once.$$" 2>/dev/null; then
+    cat "$FAKE_STATE/.once.$$"
+    /bin/rm -f "$FAKE_STATE/.once.$$"
+  elif [ -n "${FAKE_STATE-}" ] && [ -f "$FAKE_STATE/tmux-capture" ]; then
     cat "$FAKE_STATE/tmux-capture"
   else
     printf '%s' "${FAKE_TMUX_CAPTURE:-}"
