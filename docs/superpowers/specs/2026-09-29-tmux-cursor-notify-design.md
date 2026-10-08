@@ -1,6 +1,6 @@
 # tmux-cursor-notify design
 
-Status: ready for review. Independent spec review was run; the notes below include its last corrections.
+Status: implemented. Extended by [tmux-agent-notify design](2026-10-08-tmux-agent-notify-design.md), which makes the tool work for other agents; where the two disagree, the newer document wins.
 
 Date: 2026-09-29
 
