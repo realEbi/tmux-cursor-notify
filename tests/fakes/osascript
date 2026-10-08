@@ -12,12 +12,20 @@ if printf '%s' "$line" | grep -q 'to activate'; then
 fi
 
 if printf '%s' "$line" | grep -q 'bundle identifier of first'; then
-  printf '%s\n' "${FAKE_OSA_BUNDLE:-com.example.Other}"
+  if [ -n "${FAKE_STATE-}" ] && [ -f "$FAKE_STATE/osa-bundle" ]; then
+    printf '%s\n' "$(cat "$FAKE_STATE/osa-bundle")"
+  else
+    printf '%s\n' "${FAKE_OSA_BUNDLE:-com.example.Other}"
+  fi
   exit "${FAKE_OSA_EXIT:-0}"
 fi
 
 if printf '%s' "$line" | grep -q 'name of first application process'; then
-  printf '%s\n' "${FAKE_OSA_NAME:-Safari}"
+  if [ -n "${FAKE_STATE-}" ] && [ -f "$FAKE_STATE/osa-name" ]; then
+    printf '%s\n' "$(cat "$FAKE_STATE/osa-name")"
+  else
+    printf '%s\n' "${FAKE_OSA_NAME:-Safari}"
+  fi
   exit "${FAKE_OSA_EXIT:-0}"
 fi
 

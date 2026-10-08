@@ -3,11 +3,22 @@ mkdir -p "$FAKE_LOG"
 printf '%s\n' "$@" >> "$FAKE_LOG/tmux"
 line=$(printf '%s\n' "$*")
 if printf '%s' "$line" | grep -q 'capture-pane'; then
-  printf '%s' "${FAKE_TMUX_CAPTURE:-}"
-  exit 0
+  if [ -n "${FAKE_STATE-}" ] && [ -f "$FAKE_STATE/tmux-capture" ]; then
+    cat "$FAKE_STATE/tmux-capture"
+  else
+    printf '%s' "${FAKE_TMUX_CAPTURE:-}"
+  fi
+  if [ -n "${FAKE_STATE-}" ] && [ -f "$FAKE_STATE/tmux-capture-exit" ]; then
+    exit "$(cat "$FAKE_STATE/tmux-capture-exit")"
+  fi
+  exit "${FAKE_TMUX_CAPTURE_EXIT:-0}"
 fi
 if printf '%s' "$line" | grep -q 'display-message'; then
-  printf '%s\n' "${FAKE_TMUX_DISPLAY:-1 1 1}"
+  if [ -n "${FAKE_STATE-}" ] && [ -f "$FAKE_STATE/tmux-display" ]; then
+    printf '%s\n' "$(cat "$FAKE_STATE/tmux-display")"
+  else
+    printf '%s\n' "${FAKE_TMUX_DISPLAY:-1 1 1}"
+  fi
   exit "${FAKE_TMUX_DISPLAY_EXIT:-0}"
 fi
 if printf '%s' "$line" | grep -q 'select-window'; then

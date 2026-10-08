@@ -14,27 +14,6 @@ run_hook() {
   run_capture "$ROOT/bin/notify-on-approval" <<<"$json"
 }
 
-wait_followup() {
-  local i=0
-  while [ "$i" -lt 30 ]; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-}
-
-wait_for_notifier() {
-  local i=0
-  while [ "$i" -lt 50 ]; do
-    if [ -f "$FAKE_LOG/terminal-notifier" ]; then
-      return 0
-    fi
-    sleep 0.1
-    i=$((i + 1))
-  done
-  echo "timeout waiting for terminal-notifier" >&2
-  exit 1
-}
-
 shell_json='{"command":"npm install deps","conversation_id":"c1","workspace_roots":["/tmp/app"]}'
 mcp_json='{"tool_name":"search_docs","tool_input":"{\"query\":\"long enough\"}","conversation_id":"c1","workspace_roots":["/tmp/app"]}'
 
@@ -48,7 +27,7 @@ test_approval_no_pane() {
   run_hook "$shell_json"
   assert_exit 0
   assert_stdout_trimmed '{}'
-  wait_followup
+  wait_quiet
   assert_not_called terminal-notifier
 }
 
@@ -59,7 +38,7 @@ test_approval_no_prompt() {
   run_hook "$shell_json"
   assert_exit 0
   assert_stdout_trimmed '{}'
-  wait_followup
+  wait_quiet
   assert_not_called terminal-notifier
 }
 
@@ -107,7 +86,7 @@ test_approval_stale_prompt_skipped() {
   done
   export FAKE_TMUX_CAPTURE="$pad"
   run_hook "$shell_json"
-  wait_followup
+  wait_quiet
   assert_not_called terminal-notifier
 }
 
@@ -128,7 +107,7 @@ test_approval_visible_pane_silent() {
   export FAKE_TMUX_DISPLAY='1 1 1'
   export FAKE_TMUX_CAPTURE="$prompt_shell"
   run_hook "$shell_json"
-  wait_followup
+  wait_quiet
   assert_not_called terminal-notifier
 }
 
