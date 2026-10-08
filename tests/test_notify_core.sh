@@ -9,7 +9,7 @@ run_hook() {
   elif [ -z "${TMUX_PANE+x}" ]; then
     export TMUX_PANE=%12
   fi
-  run_capture "$ROOT/bin/notify-on-stop" <<<"$json"
+  run_capture "$ROOT/bin/notify" cursor stop <<<"$json"
 }
 
 completed='{"status":"completed","conversation_id":"c1","workspace_roots":["/tmp/app"]}'
@@ -215,7 +215,7 @@ test_notify_bad_json() {
 test_notify_empty_stdin() {
   harness_use_fakes
   export TMUX_PANE=%12
-  run_capture "$ROOT/bin/notify-on-stop" </dev/null
+  run_capture "$ROOT/bin/notify" cursor stop </dev/null
   expect_silent
 }
 
@@ -418,6 +418,41 @@ test_notify_not_frontmost_skips_pane_check() {
   assert_log_lacks tmux 'display-message'
 }
 
+# run_notify ARGS...
+# Run bin/notify with the given arguments and a valid stop payload on stdin.
+run_notify() {
+  export TMUX_PANE=%12
+  run_capture "$ROOT/bin/notify" "$@" <<<"$completed"
+}
+
+test_core_unknown_agent() {
+  harness_use_fakes
+  run_notify nosuch stop
+  expect_silent
+}
+
+test_core_bad_agent_name() {
+  harness_use_fakes
+  run_notify ../lib stop
+  expect_silent
+
+  harness_use_fakes
+  run_notify 'cur sor' stop
+  expect_silent
+}
+
+test_core_unknown_event() {
+  harness_use_fakes
+  run_notify cursor nosuch
+  expect_silent
+}
+
+test_core_no_args() {
+  harness_use_fakes
+  run_notify
+  expect_silent
+}
+
 run_tests \
   test_notify_folder_is_not_run \
   test_notify_completed \
@@ -463,4 +498,8 @@ run_tests \
   test_notify_pane_check_fails \
   test_notify_pane_check_garbage \
   test_notify_pane_check_socket \
-  test_notify_not_frontmost_skips_pane_check
+  test_notify_not_frontmost_skips_pane_check \
+  test_core_unknown_agent \
+  test_core_bad_agent_name \
+  test_core_unknown_event \
+  test_core_no_args

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Hook entry point for every agent: notify <agent> <hook-event>, payload on stdin.
+# The adapter in agents/<agent>.sh reads the payload; this script decides
+# whether to notify. Always answers {}, so the agent carries on as usual.
+. "$(cd "$(dirname "$0")" && pwd -P)/lib.sh"
+agent=${1-} event=${2-}
+input=$(cat)
+
+# The agent name becomes part of a path, so only lowercase letters are accepted.
+case $agent in
+  '' | *[!abcdefghijklmnopqrstuvwxyz]*) agent= ;;
+esac
+
+if [ -n "${TMUX_PANE-}" ] && [ -n "$agent" ] && [ -f "$LIB_DIR/agents/$agent.sh" ]; then
+  . "$LIB_DIR/agents/$agent.sh"
+  kind= session= folder= detail= title=
+  agent_parse "$event" "$input"
+
+  # The folder is the last part of the path, e.g. /a/b/ -> b.
+  while [[ $folder == */ ]]; do
+    folder=${folder%/}
+  done
+  folder=${folder##*/}
+  group="$agent-${session:-unknown}"
+
+  case $kind in
+    finished | failed)
+      # Stay quiet when you are already looking at this pane.
+      if ! { terminal_is_front && pane_is_visible "$TMUX_PANE"; }; then
+        notify "$title" "${folder:-agent}" "$group" "$TMUX_PANE"
+      fi
+      ;;
+  esac
+fi
+printf '{}\n'
